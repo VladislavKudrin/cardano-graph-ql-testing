@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GraphQL Performance</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0f1117;--surface:#1a1d27;--surface2:#22263a;--border:#2e3250;
+  --text:#e2e8f0;--muted:#8892b0;--accent:#4f9cf9;--green:#22c55e;
+  --red:#ef4444;--yellow:#f59e0b;--purple:#a78bfa;--radius:10px;
+}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+  background:var(--bg);color:var(--text);line-height:1.5;min-height:100vh}
+a{color:var(--accent)}
+input,select,textarea{background:var(--surface2);border:1px solid var(--border);color:var(--text);
+  border-radius:6px;padding:7px 10px;font-size:.875em;outline:none;width:100%}
+input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(79,156,249,.2)}
+label{font-size:.8em;color:var(--muted);display:block;margin-bottom:4px}
+button{cursor:pointer;border:none;border-radius:6px;font-size:.875em;font-weight:600;
+  padding:7px 16px;transition:all .15s}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{filter:brightness(1.1)}
+.btn-danger{background:var(--red);color:#fff}
+.btn-danger:hover{filter:brightness(1.1)}
+.btn-ghost{background:transparent;color:var(--muted);border:1px solid var(--border)}
+.btn-ghost:hover{border-color:var(--text);color:var(--text)}
+.btn-sm{padding:4px 11px;font-size:.8em}
+.btn-icon{background:transparent;color:var(--muted);border:1px solid var(--border);padding:5px 9px}
+.btn-icon:hover{color:var(--text);border-color:var(--text)}
+
+/* Layout */
+.topbar{display:flex;align-items:center;justify-content:space-between;
+  padding:14px 24px;border-bottom:1px solid var(--border);background:var(--surface)}
+.topbar h1{font-size:1.1em;font-weight:700;display:flex;align-items:center;gap:10px}
+.topbar h1 span{font-size:.75em;background:var(--accent);color:#fff;
+  border-radius:4px;padding:1px 7px;font-weight:600}
+.main{padding:20px 24px;max-width:1600px;margin:0 auto}
+
+/* Instance grid */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(560px,1fr));gap:16px;margin-bottom:24px}
+@media(max-width:640px){.grid{grid-template-columns:1fr}}
+
+/* Instance card */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+.card-header{padding:14px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border)}
+.card-header .name{font-weight:700;font-size:1em;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-header .url{font-size:.78em;color:var(--muted);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;max-width:200px}
+.status-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+.status-dot.idle{background:var(--muted)}
+.status-dot.starting,.status-dot.spawning{background:var(--yellow);animation:pulse 1s infinite}
+.status-dot.running{background:var(--green);animation:pulse 2s infinite}
+.status-dot.stopped,.status-dot.error{background:var(--red)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.status-label{font-size:.75em;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+.status-label.idle{color:var(--muted)}
+.status-label.starting,.status-label.spawning{color:var(--yellow)}
+.status-label.running{color:var(--green)}
+.status-label.stopped,.status-label.error{color:var(--red)}
+.elapsed{font-size:.75em;color:var(--muted);margin-left:auto}
+
+/* Config panel */
+.config-panel{padding:14px 16px;background:var(--surface2);border-bottom:1px solid var(--border)}
+.config-grid{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px}
+@media(max-width:540px){.config-grid{grid-template-columns:1fr 1fr}}
+.config-advanced{margin-top:10px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+.config-toggle{font-size:.78em;color:var(--muted);cursor:pointer;margin-top:8px;display:inline-flex;gap:4px;align-items:center}
+
+/* Controls */
+.controls{padding:12px 16px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border)}
+
+/* Metric tiles */
+.metrics-row{display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid var(--border)}
+.metric-tile{padding:12px 14px;text-align:center;border-right:1px solid var(--border)}
+.metric-tile:last-child{border-right:none}
+.metric-tile .val{font-size:1.6em;font-weight:700;line-height:1}
+.metric-tile .lbl{font-size:.72em;color:var(--muted);margin-top:3px;text-transform:uppercase;letter-spacing:.04em}
+
+/* Charts */
+.charts-area{padding:14px 16px;display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:500px){.charts-area{grid-template-columns:1fr}}
+.chart-wrap{position:relative}
+.chart-title{font-size:.75em;font-weight:600;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.06em;margin-bottom:8px}
+
+/* Per-query table */
+.query-table-wrap{border-top:1px solid var(--border);overflow-x:auto}
+.query-table{width:100%;border-collapse:collapse;font-size:.8em}
+.query-table th{padding:7px 12px;text-align:left;color:var(--muted);font-size:.72em;
+  text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--border);
+  white-space:nowrap}
+.query-table td{padding:6px 12px;border-bottom:1px solid var(--surface2);white-space:nowrap}
+.query-table tbody tr:hover{background:var(--surface2)}
+.query-name{font-family:monospace;color:var(--accent)}
+
+/* Comparison section */
+.comparison{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:20px}
+.comparison h2{padding:14px 18px;font-size:.95em;border-bottom:1px solid var(--border)}
+.cmp-table{width:100%;border-collapse:collapse;font-size:.875em}
+.cmp-table th,.cmp-table td{padding:9px 16px;border-bottom:1px solid var(--border);text-align:right}
+.cmp-table th:first-child,.cmp-table td:first-child{text-align:left;color:var(--muted);font-size:.8em;text-transform:uppercase}
+.cmp-table thead th{color:var(--muted);font-size:.75em;text-transform:uppercase;letter-spacing:.04em}
+.cmp-badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:.78em;font-weight:700}
+.badge-green{background:rgba(34,197,94,.15);color:var(--green)}
+.badge-red{background:rgba(239,68,68,.15);color:var(--red)}
+.badge-yellow{background:rgba(245,158,11,.15);color:var(--yellow)}
+
+/* Add modal */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;display:flex;align-items:center;justify-content:center}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;
+  padding:24px;width:min(460px,95vw);box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.modal h2{font-size:1em;margin-bottom:16px}
+.modal-fields{display:grid;gap:12px;margin-bottom:18px}
+.modal-actions{display:flex;gap:8px;justify-content:flex-end}
+.hidden{display:none}
+
+/* Empty state */
+.empty{text-align:center;padding:60px 24px;color:var(--muted)}
+.empty .icon{font-size:3em;margin-bottom:12px}
+.empty p{font-size:.9em}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>🚀 GraphQL Performance <span>BETA</span></h1>
+  <div style="display:flex;gap:8px;align-items:center">
+    <span id="globalStatus" style="font-size:.8em;color:var(--muted)">No instances</span>
+    <button class="btn-primary btn-sm" onclick="openAddModal()">+ Add Instance</button>
+  </div>
+</div>
+
+<div class="main">
+  <div class="grid" id="instanceGrid"></div>
+  <div class="comparison hidden" id="comparisonSection">
+    <h2>📊 Instance Comparison</h2>
+    <div style="overflow-x:auto">
+      <table class="cmp-table">
+        <thead id="cmpHead"></thead>
+        <tbody id="cmpBody"></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="empty hidden" id="emptyState">
+    <div class="icon">🔬</div>
+    <p>No test instances yet.<br>Add one to start load testing your GraphQL API.</p>
+    <br>
+    <button class="btn-primary" onclick="openAddModal()">+ Add Instance</button>
+  </div>
+</div>
+
+<!-- Add/Edit Modal -->
+<div class="overlay hidden" id="addModal" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <h2 id="modalTitle">Add Instance</h2>
+    <div class="modal-fields">
+      <div>
+        <label>Name</label>
+        <input id="mName" placeholder="preprod" />
+      </div>
+      <div>
+        <label>GraphQL URL</label>
+        <input id="mUrl" placeholder="http://localhost:3100" />
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn-primary" onclick="saveModal()">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── state ───────────────────────────────────────────────────────────────
+const state = {
+  instances: {},      // id -> { meta, history, charts, pollTimer }
+  modalMode: 'add',
+  modalEditId: null,
+};
+
+// ── Chart.js defaults ────────────────────────────────────────────────────
+Chart.defaults.color = '#8892b0';
+Chart.defaults.borderColor = '#2e3250';
+Chart.defaults.font.family = '-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif';
+Chart.defaults.font.size = 11;
+
+function mkTimeChart(ctx, datasets, yLabel) {
+  return new Chart(ctx, {
+    type: 'line',
+    data: { labels: [], datasets },
+    options: {
+      responsive: true,
+      animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { display: datasets.length > 1, position: 'top', labels: { boxWidth: 10, padding: 10 } } },
+      scales: {
+        x: { display: false },
+        y: {
+          title: { display: !!yLabel, text: yLabel, color: '#8892b0' },
+          grid: { color: '#2e3250' },
+          beginAtZero: true,
+        }
+      },
+      elements: { point: { radius: 0 }, line: { tension: 0.3 } },
+    }
+  });
+}
+
+function pushPoint(chart, label, ...values) {
+  chart.data.labels.push(label);
+  chart.data.datasets.forEach((ds, i) => ds.data.push(values[i] ?? null));
+  if (chart.data.labels.length > 150) {
+    chart.data.labels.shift();
+    chart.data.datasets.forEach(ds => ds.data.shift());
+  }
+  chart.update('none');
+}
+
+// ── API ───────────────────────────────────────────────────────────────────
+const API = '/api';
+
+async function apiFetch(path, opts = {}) {
+  const r = await fetch(API + path, opts);
+  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || r.statusText); }
+  return r.json();
+}
+
+// ── bootstrap ─────────────────────────────────────────────────────────────
+async function init() {
+  const list = await apiFetch('/instances');
+  list.forEach(inst => addInstanceCard(inst));
+  updateGlobalStatus();
+}
+
+// ── add/edit modal ────────────────────────────────────────────────────────
+function openAddModal() {
+  state.modalMode = 'add';
+  state.modalEditId = null;
+  document.getElementById('modalTitle').textContent = 'Add Instance';
+  document.getElementById('mName').value = '';
+  document.getElementById('mUrl').value = '';
+  document.getElementById('addModal').classList.remove('hidden');
+  document.getElementById('mName').focus();
+}
+
+function openEditModal(id) {
+  const inst = state.instances[id].meta;
+  state.modalMode = 'edit';
+  state.modalEditId = id;
+  document.getElementById('modalTitle').textContent = 'Edit Instance';
+  document.getElementById('mName').value = inst.name;
+  document.getElementById('mUrl').value = inst.url;
+  document.getElementById('addModal').classList.remove('hidden');
+}
+
+function closeModal() {
+  document.getElementById('addModal').classList.add('hidden');
+}
+
+async function saveModal() {
+  const name = document.getElementById('mName').value.trim();
+  const url = document.getElementById('mUrl').value.trim();
+  if (!name || !url) return alert('Name and URL required');
+  try {
+    if (state.modalMode === 'add') {
+      const inst = await apiFetch('/instances', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ name, url })
+      });
+      addInstanceCard(inst);
+    } else {
+      const inst = await apiFetch(`/instances/${state.modalEditId}`, {
+        method: 'PATCH', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ name, url })
+      });
+      updateCardMeta(inst);
+    }
+    closeModal();
+    updateGlobalStatus();
+  } catch(e) { alert(e.message); }
+}
+
+// ── card rendering ────────────────────────────────────────────────────────
+function addInstanceCard(inst) {
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.id = `card-${inst.id}`;
+  el.innerHTML = cardHTML(inst);
+  document.getElementById('instanceGrid').appendChild(el);
+  document.getElementById('emptyState').classList.add('hidden');
+
+  initCharts(inst.id);
+  bindCardEvents(inst.id);
+
+  state.instances[inst.id] = { meta: inst, pollTimer: null, charts: null };
+  startPolling(inst.id);
+}
+
+function cardHTML(inst) {
+  return `
+<div class="card-header">
+  <div class="status-dot idle" id="dot-${inst.id}"></div>
+  <div>
+    <div class="name">${esc(inst.name)}</div>
+    <div class="url">${esc(inst.url)}</div>
+  </div>
+  <div class="status-label idle" id="slabel-${inst.id}">IDLE</div>
+  <div class="elapsed" id="elapsed-${inst.id}"></div>
+  <button class="btn-icon btn-sm" title="Edit" onclick="openEditModal('${inst.id}')">✏️</button>
+  <button class="btn-icon btn-sm" title="Remove" onclick="removeInstance('${inst.id}')">🗑</button>
+</div>
+
+<div class="config-panel">
+  <div class="config-grid">
+    <div>
+      <label>Users</label>
+      <input type="number" id="cfg-users-${inst.id}" value="5" min="1" max="500" />
+    </div>
+    <div>
+      <label>Spawn rate /s</label>
+      <input type="number" id="cfg-spawn-${inst.id}" value="1" min="0.1" step="0.1" />
+    </div>
+    <div>
+      <label>Run time</label>
+      <input id="cfg-time-${inst.id}" placeholder="∞  (e.g. 60s, 5m)" />
+    </div>
+    <div>
+      <label>Query profile</label>
+      <select id="cfg-profile-${inst.id}">
+        <option value="full">Full</option>
+        <option value="light">Light (fast only)</option>
+      </select>
+    </div>
+  </div>
+  <div>
+    <div class="config-toggle" onclick="toggleAdvanced('${inst.id}')">
+      <span id="adv-arrow-${inst.id}">▶</span> Advanced options
+    </div>
+    <div class="config-advanced hidden" id="adv-${inst.id}">
+      <div>
+        <label>Payment address</label>
+        <input id="cfg-addr-${inst.id}" placeholder="addr1q…" />
+      </div>
+      <div>
+        <label>TX hash</label>
+        <input id="cfg-tx-${inst.id}" placeholder="5f20df…" />
+      </div>
+      <div>
+        <label>Stake address</label>
+        <input id="cfg-stake-${inst.id}" placeholder="stake1u…" />
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="controls">
+  <button class="btn-primary" id="btn-start-${inst.id}" onclick="startTest('${inst.id}')">▶ Start</button>
+  <button class="btn-danger hidden" id="btn-stop-${inst.id}" onclick="stopTest('${inst.id}')">⏹ Stop</button>
+  <button class="btn-ghost btn-sm" id="btn-reset-${inst.id}" onclick="resetStats('${inst.id}')">↺ Reset</button>
+  <div style="margin-left:auto;font-size:.78em;color:var(--muted)" id="users-badge-${inst.id}"></div>
+</div>
+
+<div class="metrics-row">
+  <div class="metric-tile">
+    <div class="val" id="m-rps-${inst.id}" style="color:var(--accent)">—</div>
+    <div class="lbl">req/s</div>
+  </div>
+  <div class="metric-tile">
+    <div class="val" id="m-p95-${inst.id}" style="color:var(--yellow)">—</div>
+    <div class="lbl">p95 ms</div>
+  </div>
+  <div class="metric-tile">
+    <div class="val" id="m-fail-${inst.id}" style="color:var(--red)">—</div>
+    <div class="lbl">err %</div>
+  </div>
+  <div class="metric-tile">
+    <div class="val" id="m-total-${inst.id}" style="color:var(--muted)">—</div>
+    <div class="lbl">total reqs</div>
+  </div>
+</div>
+
+<div class="charts-area">
+  <div class="chart-wrap">
+    <div class="chart-title">Requests / second</div>
+    <canvas id="chart-rps-${inst.id}" height="130"></canvas>
+  </div>
+  <div class="chart-wrap">
+    <div class="chart-title">Latency (ms)</div>
+    <canvas id="chart-lat-${inst.id}" height="130"></canvas>
+  </div>
+</div>
+
+<div class="query-table-wrap">
+  <table class="query-table">
+    <thead>
+      <tr>
+        <th>Query</th>
+        <th style="text-align:right">RPS</th>
+        <th style="text-align:right">p50</th>
+        <th style="text-align:right">p95</th>
+        <th style="text-align:right">p99</th>
+        <th style="text-align:right">Fails</th>
+        <th style="text-align:right">Total</th>
+      </tr>
+    </thead>
+    <tbody id="qtable-${inst.id}"></tbody>
+  </table>
+</div>`;
+}
+
+function initCharts(id) {
+  const rpsCtx = document.getElementById(`chart-rps-${id}`).getContext('2d');
+  const latCtx = document.getElementById(`chart-lat-${id}`).getContext('2d');
+
+  const rpsChart = mkTimeChart(rpsCtx, [
+    { label: 'RPS', data: [], borderColor: '#4f9cf9', backgroundColor: 'rgba(79,156,249,.1)', fill: true }
+  ], 'req/s');
+
+  const latChart = mkTimeChart(latCtx, [
+    { label: 'p50', data: [], borderColor: '#22c55e', backgroundColor: 'transparent' },
+    { label: 'p95', data: [], borderColor: '#f59e0b', backgroundColor: 'transparent' },
+    { label: 'p99', data: [], borderColor: '#ef4444', backgroundColor: 'transparent' },
+  ], 'ms');
+
+  if (state.instances[id]) {
+    state.instances[id].charts = { rps: rpsChart, lat: latChart };
+  } else {
+    state.instances[id] = { meta: null, pollTimer: null, charts: { rps: rpsChart, lat: latChart } };
+  }
+}
+
+function bindCardEvents(id) {
+  document.getElementById(`cfg-users-${id}`).addEventListener('keydown', e => { if(e.key==='Enter') startTest(id); });
+}
+
+function toggleAdvanced(id) {
+  const el = document.getElementById(`adv-${id}`);
+  const arrow = document.getElementById(`adv-arrow-${id}`);
+  const hidden = el.classList.toggle('hidden');
+  arrow.textContent = hidden ? '▶' : '▼';
+}
+
+// ── polling ────────────────────────────────────────────────────────────────
+function startPolling(id) {
+  const existing = state.instances[id]?.pollTimer;
+  if (existing) clearInterval(existing);
+
+  const timer = setInterval(() => poll(id), 2000);
+  if (state.instances[id]) state.instances[id].pollTimer = timer;
+}
+
+async function poll(id) {
+  if (!state.instances[id]) return;
+  try {
+    const data = await apiFetch(`/instances/${id}/metrics?tail=1`);
+    updateCard(id, data);
+    updateComparison();
+  } catch(_) {}
+}
+
+function updateCard(id, data) {
+  const inst = state.instances[id];
+  if (!inst) return;
+
+  const { status, last_snap: snap, started_at, users_current } = data;
+
+  // Status dot + label
+  const dot = document.getElementById(`dot-${id}`);
+  const slabel = document.getElementById(`slabel-${id}`);
+  if (dot) { dot.className = `status-dot ${status}`; }
+  if (slabel) { slabel.className = `status-label ${status}`; slabel.textContent = status.toUpperCase(); }
+
+  // Elapsed
+  const elapsedEl = document.getElementById(`elapsed-${id}`);
+  if (elapsedEl && started_at && status === 'running') {
+    const secs = Math.floor(Date.now() / 1000 - started_at);
+    const m = String(Math.floor(secs / 60)).padStart(2, '0');
+    const s = String(secs % 60).padStart(2, '0');
+    elapsedEl.textContent = `${m}:${s}`;
+  } else if (elapsedEl && status !== 'running') {
+    elapsedEl.textContent = '';
+  }
+
+  // Users badge
+  const badge = document.getElementById(`users-badge-${id}`);
+  if (badge && users_current > 0) badge.textContent = `👥 ${users_current} users`;
+  else if (badge) badge.textContent = '';
+
+  // Start/stop button visibility
+  const btnStart = document.getElementById(`btn-start-${id}`);
+  const btnStop = document.getElementById(`btn-stop-${id}`);
+  const isActive = ['running', 'spawning', 'starting'].includes(status);
+  if (btnStart) btnStart.classList.toggle('hidden', isActive);
+  if (btnStop) btnStop.classList.toggle('hidden', !isActive);
+
+  if (!snap) return;
+
+  // Metric tiles
+  setText(`m-rps-${id}`, snap.rps.toFixed(2));
+  setText(`m-p95-${id}`, snap.p95 || '—');
+  setText(`m-fail-${id}`, `${snap.fail_ratio}%`);
+  const totalReqs = snap.agg ? snap.agg.reqs : 0;
+  setText(`m-total-${id}`, totalReqs.toLocaleString());
+
+  // Charts
+  const charts = inst.charts;
+  if (charts) {
+    const ts = new Date(snap.ts * 1000).toLocaleTimeString();
+    pushPoint(charts.rps, ts, snap.rps);
+    pushPoint(charts.lat, ts, snap.p50, snap.p95, snap.agg?.p99 || null);
+  }
+
+  // Per-query table
+  const tbody = document.getElementById(`qtable-${id}`);
+  if (tbody && snap.per_query) {
+    tbody.innerHTML = snap.per_query.map(q => {
+      const errColor = q.fails > 0 ? 'color:var(--red)' : '';
+      return `<tr>
+        <td class="query-name">${esc(q.name)}</td>
+        <td style="text-align:right">${q.rps.toFixed(2)}</td>
+        <td style="text-align:right">${q.p50}</td>
+        <td style="text-align:right">${q.p95}</td>
+        <td style="text-align:right">${q.p99}</td>
+        <td style="text-align:right;${errColor}">${q.fails}</td>
+        <td style="text-align:right;color:var(--muted)">${q.reqs.toLocaleString()}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // Sync meta status
+  if (inst.meta) inst.meta.status = status;
+}
+
+// ── comparison table ──────────────────────────────────────────────────────
+function updateComparison() {
+  const running = Object.values(state.instances).filter(i => i.meta && i.meta.status === 'running');
+  const section = document.getElementById('comparisonSection');
+  if (running.length < 2) { section.classList.add('hidden'); return; }
+  section.classList.remove('hidden');
+
+  const head = document.getElementById('cmpHead');
+  const body = document.getElementById('cmpBody');
+
+  head.innerHTML = '<tr><th>Metric</th>' +
+    running.map(i => `<th style="text-align:right">${esc(i.meta.name)}</th>`).join('') + '</tr>';
+
+  const metrics = [
+    { label: 'Status', key: 'status', fmt: v => v },
+    { label: 'RPS', key: 'rps', fmt: v => v.toFixed(2), colorFn: vals => best(vals, 'high') },
+    { label: 'p50 ms', key: 'p50', fmt: v => v, colorFn: vals => best(vals, 'low') },
+    { label: 'p95 ms', key: 'p95', fmt: v => v, colorFn: vals => best(vals, 'low') },
+    { label: 'Error %', key: 'fail_ratio', fmt: v => v + '%', colorFn: vals => best(vals, 'low') },
+    { label: 'Users', key: 'users', fmt: v => v },
+  ];
+
+  body.innerHTML = metrics.map(m => {
+    const vals = running.map(i => i.meta.last_snap?.[m.key] ?? i.meta[m.key] ?? null);
+    const classes = m.colorFn ? m.colorFn(vals) : vals.map(() => '');
+    return '<tr><td>' + m.label + '</td>' +
+      vals.map((v, i) => {
+        const badge = classes[i] ? `<span class="cmp-badge ${classes[i]}">${v !== null ? m.fmt(v) : '—'}</span>` : (v !== null ? m.fmt(v) : '—');
+        return `<td style="text-align:right">${badge}</td>`;
+      }).join('') + '</tr>';
+  }).join('');
+}
+
+function best(vals, dir) {
+  const nums = vals.map(v => parseFloat(v) || 0);
+  const extreme = dir === 'high' ? Math.max(...nums) : Math.min(...nums);
+  return nums.map(n => {
+    if (n === extreme) return 'badge-green';
+    if (Math.abs(n - extreme) / (extreme || 1) < 0.1) return 'badge-yellow';
+    return 'badge-red';
+  });
+}
+
+// ── controls ──────────────────────────────────────────────────────────────
+async function startTest(id) {
+  const users = parseInt(document.getElementById(`cfg-users-${id}`).value) || 5;
+  const spawn_rate = parseFloat(document.getElementById(`cfg-spawn-${id}`).value) || 1;
+  const run_time = document.getElementById(`cfg-time-${id}`).value.trim();
+  const load_profile = document.getElementById(`cfg-profile-${id}`).value;
+  const payment_address = document.getElementById(`cfg-addr-${id}`).value.trim();
+  const tx_hash = document.getElementById(`cfg-tx-${id}`).value.trim();
+  const stake_address = document.getElementById(`cfg-stake-${id}`).value.trim();
+
+  try {
+    await apiFetch(`/instances/${id}/start`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ users, spawn_rate, run_time, load_profile, payment_address, tx_hash, stake_address })
+    });
+    if (state.instances[id]?.charts) {
+      state.instances[id].charts.rps.data.labels = [];
+      state.instances[id].charts.rps.data.datasets[0].data = [];
+      state.instances[id].charts.rps.update('none');
+      state.instances[id].charts.lat.data.labels = [];
+      state.instances[id].charts.lat.data.datasets.forEach(ds => ds.data = []);
+      state.instances[id].charts.lat.update('none');
+    }
+    if (state.instances[id]?.meta) state.instances[id].meta.status = 'starting';
+  } catch(e) { alert('Start failed: ' + e.message); }
+}
+
+async function stopTest(id) {
+  try {
+    await apiFetch(`/instances/${id}/stop`, { method: 'POST' });
+    if (state.instances[id]?.meta) state.instances[id].meta.status = 'idle';
+    updateComparison();
+  } catch(e) { alert('Stop failed: ' + e.message); }
+}
+
+async function resetStats(id) {
+  try {
+    await apiFetch(`/instances/${id}/reset`, { method: 'POST' });
+    const inst = state.instances[id];
+    if (inst?.charts) {
+      ['rps','lat'].forEach(k => {
+        inst.charts[k].data.labels = [];
+        inst.charts[k].data.datasets.forEach(ds => ds.data = []);
+        inst.charts[k].update('none');
+      });
+    }
+    setText(`m-rps-${id}`, '—');
+    setText(`m-p95-${id}`, '—');
+    setText(`m-fail-${id}`, '—');
+    setText(`m-total-${id}`, '—');
+    const tbody = document.getElementById(`qtable-${id}`);
+    if (tbody) tbody.innerHTML = '';
+  } catch(e) { alert(e.message); }
+}
+
+async function removeInstance(id) {
+  if (!confirm('Remove this instance?')) return;
+  try {
+    await apiFetch(`/instances/${id}`, { method: 'DELETE' });
+    const inst = state.instances[id];
+    if (inst?.pollTimer) clearInterval(inst.pollTimer);
+    delete state.instances[id];
+    const el = document.getElementById(`card-${id}`);
+    if (el) el.remove();
+    if (Object.keys(state.instances).length === 0) {
+      document.getElementById('emptyState').classList.remove('hidden');
+    }
+    updateGlobalStatus();
+    updateComparison();
+  } catch(e) { alert(e.message); }
+}
+
+function updateCardMeta(inst) {
+  const s = state.instances[inst.id];
+  if (s) s.meta = { ...s.meta, ...inst };
+  const nameEl = document.querySelector(`#card-${inst.id} .name`);
+  const urlEl = document.querySelector(`#card-${inst.id} .url`);
+  if (nameEl) nameEl.textContent = inst.name;
+  if (urlEl) urlEl.textContent = inst.url;
+}
+
+function updateGlobalStatus() {
+  const n = Object.keys(state.instances).length;
+  const el = document.getElementById('globalStatus');
+  if (el) el.textContent = n === 0 ? 'No instances' : `${n} instance${n > 1 ? 's' : ''}`;
+}
+
+// ── utils ─────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function setText(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+
+// ── keyboard shortcuts ────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeModal();
+  if (e.key === 'n' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); openAddModal(); }
+});
+
+// ── init ───────────────────────────────────────────────────────────────────
+init().then(() => {
+  if (Object.keys(state.instances).length === 0) {
+    document.getElementById('emptyState').classList.remove('hidden');
+  }
+  updateGlobalStatus();
+});
+</script>
+</body>
+</html>
