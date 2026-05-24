@@ -43,7 +43,7 @@ pipeline: dict[str, Any] = {
     "known": set(),
 }
 
-_MINT_QUERY = """{ tokenMints(limit: 30, order_by: { transaction: { includedAt: desc } }) {
+_MINT_QUERY = """{ tokenMints(limit: 30) {
   asset { assetId policyId assetName fingerprint }
   quantity
   transaction { hash includedAt }
@@ -267,9 +267,11 @@ async def _gql(url: str, query: str, variables: dict | None = None) -> dict | No
             )
             data = r.json()
             if data.get("errors"):
+                print(f"[pipeline] GQL error from {url}: {data['errors'][0].get('message')}")
                 return None
             return data.get("data")
-    except Exception:
+    except Exception as e:
+        print(f"[pipeline] GQL exception from {url}: {e}")
         return None
 
 
@@ -280,8 +282,11 @@ async def _pipeline_loop() -> None:
         for inst in current:
             data = await _gql(inst["url"], _MINT_QUERY)
             if not data:
+                print(f"[pipeline] no data from {inst['url']}")
                 continue
-            for mint in data.get("tokenMints", []):
+            mints = data.get("tokenMints", [])
+            print(f"[pipeline] {inst['name']}: {len(mints)} mints, {len(pipeline['known'])} known, {len(pipeline['entries'])} entries")
+            for mint in mints:
                 asset = mint.get("asset") or {}
                 asset_id = asset.get("assetId")
                 qty = mint.get("quantity", "1")
