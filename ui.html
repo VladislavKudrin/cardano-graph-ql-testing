@@ -292,10 +292,9 @@ function addInstanceCard(inst) {
   document.getElementById('instanceGrid').appendChild(el);
   document.getElementById('emptyState').classList.add('hidden');
 
+  state.instances[inst.id] = { meta: inst, lastSnap: null, pollTimer: null, charts: null };
   initCharts(inst.id);
   bindCardEvents(inst.id);
-
-  state.instances[inst.id] = { meta: inst, pollTimer: null, charts: null };
   startPolling(inst.id);
 }
 
@@ -498,9 +497,11 @@ function updateCard(id, data) {
 
   if (!snap) return;
 
+  inst.lastSnap = snap;
+
   // Metric tiles
   setText(`m-rps-${id}`, snap.rps.toFixed(2));
-  setText(`m-p95-${id}`, snap.p95 || '—');
+  setText(`m-p95-${id}`, snap.p95 || snap.agg?.p95 || '—');
   setText(`m-fail-${id}`, `${snap.fail_ratio}%`);
   const totalReqs = snap.agg ? snap.agg.reqs : 0;
   setText(`m-total-${id}`, totalReqs.toLocaleString());
@@ -557,7 +558,7 @@ function updateComparison() {
   ];
 
   body.innerHTML = metrics.map(m => {
-    const vals = running.map(i => i.meta.last_snap?.[m.key] ?? i.meta[m.key] ?? null);
+    const vals = running.map(i => i.lastSnap?.[m.key] ?? i.meta[m.key] ?? null);
     const classes = m.colorFn ? m.colorFn(vals) : vals.map(() => '');
     return '<tr><td>' + m.label + '</td>' +
       vals.map((v, i) => {

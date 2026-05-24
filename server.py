@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import time
 import uuid
@@ -30,15 +31,64 @@ from pydantic import BaseModel
 
 LOCUSTFILE = Path(__file__).parent / "locustfile.py"
 UI_FILE = Path(__file__).parent / "ui.html"
+DB_PATH = Path(__file__).parent / "instances.db"
 
 instances: dict[str, dict[str, Any]] = {}
 _poll_tasks: dict[str, asyncio.Task] = {}
+
+
+# ── sqlite helpers ─────────────────────────────────────────────────────────
+
+def _db_init() -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS instances (
+                id   TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                url  TEXT NOT NULL,
+                port INTEGER NOT NULL
+            )
+        """)
+
+
+def _db_save(inst: dict) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO instances (id, name, url, port) VALUES (?, ?, ?, ?)",
+            (inst["id"], inst["name"], inst["url"], inst["port"]),
+        )
+
+
+def _db_delete(id: str) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM instances WHERE id = ?", (id,))
+
+
+def _db_load() -> list[dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(r) for r in conn.execute("SELECT * FROM instances ORDER BY rowid")]
 
 
 # ── lifecycle ──────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    _db_init()
+    for row in _db_load():
+        instances[row["id"]] = {
+            "id": row["id"],
+            "name": row["name"],
+            "url": row["url"],
+            "port": row["port"],
+            "status": "idle",
+            "process": None,
+            "history": [],
+            "last_snap": None,
+            "users_current": 0,
+            "started_at": None,
+            "last_config": {},
+        }
     yield
     for inst in list(instances.values()):
         _kill(inst)
@@ -212,6 +262,7 @@ async def create_instance(body: InstanceBody):
         "started_at": None,
         "last_config": {},
     }
+    _db_save(instances[id])
     return _safe(instances[id])
 
 
@@ -222,6 +273,7 @@ async def update_instance(id: str, body: InstanceBody):
         raise HTTPException(400, "Stop the test before editing")
     inst["name"] = body.name
     inst["url"] = body.url.rstrip("/")
+    _db_save(inst)
     return _safe(inst)
 
 
@@ -233,6 +285,7 @@ async def delete_instance(id: str):
     if task:
         task.cancel()
     del instances[id]
+    _db_delete(id)
     return {"ok": True}
 
 
@@ -285,8 +338,7 @@ async def _do_start(id: str, body: StartBody) -> None:
     port = inst["port"]
     for _ in range(30):
         await asyncio.sleep(0.5)
-        data = await _locust_get(port, "/", timeout=1)
-        if data is not None or await _locust_get(port, "/stats/requests", timeout=1):
+        if await _locust_get(port, "/stats/requests", timeout=1) is not None:
             break
     else:
         if id in instances:
