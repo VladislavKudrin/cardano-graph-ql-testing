@@ -142,11 +142,11 @@ button{cursor:pointer;border:none;border-radius:6px;font-size:.875em;font-weight
 .psumm-stat strong{color:var(--text)}
 .psumm-stat strong.good{color:var(--green)}
 .psumm-stat strong.warn{color:var(--yellow)}
-.pipeline-table{width:100%;border-collapse:collapse;font-size:.8em;table-layout:fixed}
+.pipeline-table{width:100%;border-collapse:collapse;font-size:.8em}
 .pipeline-table th{padding:7px 12px;text-align:left;color:var(--muted);font-size:.72em;text-transform:uppercase;
-  letter-spacing:.04em;border-bottom:1px solid var(--border);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pipeline-table th.col-lag{text-align:center}
-.pipeline-table td{padding:7px 12px;border-bottom:1px solid var(--surface2);white-space:nowrap;vertical-align:middle;overflow:hidden;text-overflow:ellipsis}
+  letter-spacing:.04em;border-bottom:1px solid var(--border);white-space:nowrap}
+.pipeline-table th.col-lag{text-align:center;min-width:130px}
+.pipeline-table td{padding:7px 12px;border-bottom:1px solid var(--surface2);white-space:nowrap;vertical-align:middle}
 .pipeline-table td.col-lag{text-align:center}
 .pipeline-table tbody tr:hover{background:var(--surface2)}
 .lag-pending{color:var(--yellow);animation:pulse 1.5s infinite}
@@ -788,11 +788,7 @@ function pipelineRender(data) {
 
   // Table header
   const thead = document.getElementById('pipelineThead');
-  let headerHTML = '<colgroup>';
-  headerHTML += '<col style="width:14%"><col style="width:11%"><col style="width:10%"><col style="width:9%">';
-  instIds.forEach(() => { headerHTML += '<col style="width:auto"><col style="width:auto">'; });
-  headerHTML += '</colgroup>';
-  headerHTML += '<tr><th>Asset ID</th><th>Policy</th><th>Included at</th><th>Detected</th>';
+  let headerHTML = '<tr><th>Asset ID</th><th>Policy</th><th>Included at</th><th>Detected</th>';
   instIds.forEach(iid => {
     const name = esc(state.instances[iid]?.meta?.name || iid);
     headerHTML += `<th class="col-lag">${name} — asset lag</th><th class="col-lag">${name} — metadata lag</th>`;
