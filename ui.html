@@ -757,8 +757,6 @@ async function pipelinePoll() {
   } catch(_) {}
 }
 
-const META_TIMEOUT = 600;
-
 function pipelineRender(data) {
   const entries = data.entries || [];
   const summary = data.summary || {};
@@ -778,7 +776,6 @@ function pipelineRender(data) {
         <div class="psumm-row"><span>Asset avg</span><strong class="${s.asset_avg != null ? 'good' : ''}">${assetAvg}</strong></div>
         <div class="psumm-row"><span>Asset pending</span><strong class="${s.pending_asset > 0 ? 'warn' : ''}">${s.pending_asset}</strong></div>
         <div class="psumm-row"><span>Meta avg</span><strong class="${s.meta_avg != null ? 'good' : ''}">${metaAvg}</strong></div>
-        <div class="psumm-row"><span>No metadata</span><strong>${s.no_meta}</strong></div>
       </div>`;
     }).join('');
   }
@@ -824,12 +821,7 @@ function pipelineRender(data) {
 
 function lagCell(appeared_at, detected_at, prereq_at) {
   if (!detected_at) return '<span class="lag-none">—</span>';
-  if (prereq_at !== undefined) {
-    if (!prereq_at) return '<span class="lag-none">asset pending</span>';
-    if (!appeared_at && (Date.now() / 1000 - prereq_at) > META_TIMEOUT) {
-      return '<span class="lag-none">—</span>';
-    }
-  }
+  if (prereq_at !== undefined && !prereq_at) return '<span class="lag-none">asset pending</span>';
   if (!appeared_at) return '<span class="lag-pending">pending…</span>';
   const secs = (appeared_at - detected_at).toFixed(1);
   return `<span class="lag-ok">+${secs}s</span>`;

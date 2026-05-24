@@ -44,8 +44,6 @@ pipeline: dict[str, Any] = {
     "initialized": False,  # first poll baselines known without creating entries
 }
 
-METADATA_TIMEOUT = 600  # seconds — after this, metadata is considered absent
-
 _MINT_QUERY = """{ tokenMints(limit: 30) {
   asset { assetId policyId assetName fingerprint }
   quantity
@@ -339,21 +337,17 @@ async def _pipeline_loop() -> None:
                         "metadata_appeared_at": None,
                     }
                 idata = entry["instances"][iid]
-                asset_done = idata["asset_appeared_at"] is not None
-                meta_done = idata["metadata_appeared_at"] is not None or (
-                    asset_done and now - idata["asset_appeared_at"] > METADATA_TIMEOUT
-                )
-                if asset_done and meta_done:
+                if idata["asset_appeared_at"] and idata["metadata_appeared_at"]:
                     continue
                 data = await _gql(inst["url"], _ASSET_CHECK_QUERY, {"id": entry["asset_id"]})
                 if not data:
                     continue
                 assets_list = data.get("assets", [])
                 if assets_list:
-                    if not asset_done:
+                    if idata["asset_appeared_at"] is None:
                         idata["asset_appeared_at"] = now
                     a = assets_list[0]
-                    if not meta_done and (a.get("name") or a.get("description")):
+                    if idata["metadata_appeared_at"] is None and (a.get("name") or a.get("description")):
                         idata["metadata_appeared_at"] = now
 
         await asyncio.sleep(10)
@@ -553,7 +547,6 @@ async def pipeline_get():
         meta_lags = []
         pending_asset = 0
         pending_meta = 0
-        no_meta = 0
         for e in entries:
             idata = (e.get("instances") or {}).get(iid)
             if not idata:
@@ -563,8 +556,6 @@ async def pipeline_get():
                 asset_lags.append(idata["asset_appeared_at"] - det)
                 if idata["metadata_appeared_at"]:
                     meta_lags.append(idata["metadata_appeared_at"] - det)
-                elif now - idata["asset_appeared_at"] > METADATA_TIMEOUT:
-                    no_meta += 1
                 else:
                     pending_meta += 1
             else:
@@ -578,7 +569,6 @@ async def pipeline_get():
             "meta_resolved": len(meta_lags),
             "pending_asset": pending_asset,
             "pending_meta": pending_meta,
-            "no_meta": no_meta,
         }
 
     return {
