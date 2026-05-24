@@ -264,7 +264,7 @@ async def _gql(url: str, query: str, variables: dict | None = None) -> dict | No
             r = await c.post(
                 f"{url}/graphql",
                 json={"query": query, "variables": variables or {}},
-                timeout=10,
+                timeout=60,
             )
             data = r.json()
             if data.get("errors"):
@@ -272,9 +272,7 @@ async def _gql(url: str, query: str, variables: dict | None = None) -> dict | No
                 return None
             return data.get("data")
     except Exception as e:
-        import traceback
-        print(f"[pipeline] GQL exception from {url}: {type(e).__name__}: {e}")
-        traceback.print_exc()
+        print(f"[pipeline] GQL exception from {url}: {type(e).__name__}")
         return None
 
 
@@ -282,16 +280,15 @@ async def _pipeline_loop() -> None:
     while pipeline["running"]:
         current = list(instances.values())
 
-        # Use first responding instance to collect baseline/new mints
-        got_mints = False
-        for inst in current:
-            data = await _gql(inst["url"], _MINT_QUERY)
-            if not data:
-                print(f"[pipeline] no data from {inst['url']}")
-                continue
-            got_mints = True
-            mints = data.get("tokenMints", [])
-            print(f"[pipeline] {inst['name']}: {len(mints)} mints, {len(pipeline['known'])} known, {len(pipeline['entries'])} entries, initialized={pipeline['initialized']}")
+        # Query all instances concurrently; use first successful result
+        results = await asyncio.gather(*[_gql(inst["url"], _MINT_QUERY) for inst in current])
+        mint_data = next((r for r in results if r), None)
+
+        if not mint_data:
+            print(f"[pipeline] no data from any instance")
+        else:
+            mints = mint_data.get("tokenMints", [])
+            print(f"[pipeline] {len(mints)} mints, {len(pipeline['known'])} known, {len(pipeline['entries'])} entries, initialized={pipeline['initialized']}")
             for mint in mints:
                 asset = mint.get("asset") or {}
                 asset_id = asset.get("assetId")
@@ -322,11 +319,10 @@ async def _pipeline_loop() -> None:
                 pipeline["entries"].insert(0, entry)
                 if len(pipeline["entries"]) > 200:
                     pipeline["entries"].pop()
-            break  # only need one instance for mint detection
 
-        if got_mints and not pipeline["initialized"]:
-            pipeline["initialized"] = True
-            print(f"[pipeline] baseline complete, {len(pipeline['known'])} assets known")
+            if not pipeline["initialized"]:
+                pipeline["initialized"] = True
+                print(f"[pipeline] baseline complete, {len(pipeline['known'])} assets known")
 
         # Check pending entries on all instances
         now = time.time()
