@@ -42,6 +42,7 @@ pipeline: dict[str, Any] = {
     "entries": [],
     "known": set(),
     "initialized": False,  # first poll baselines known without creating entries
+    "session_id": None,
 }
 
 _MINT_QUERY = """{ tokenMints(limit: 30, order_by: { transaction: { includedAt: desc } }, where: { asset: {} }) {
@@ -69,6 +70,28 @@ def _db_init() -> None:
                 port INTEGER NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pipeline_sessions (
+                id TEXT PRIMARY KEY,
+                started_at REAL NOT NULL,
+                stopped_at REAL,
+                instances_json TEXT NOT NULL DEFAULT '{}'
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pipeline_entries (
+                session_id TEXT NOT NULL,
+                asset_id TEXT NOT NULL,
+                policy_id TEXT DEFAULT '',
+                asset_name TEXT DEFAULT '',
+                fingerprint TEXT,
+                tx_hash TEXT DEFAULT '',
+                included_at TEXT DEFAULT '',
+                detected_at REAL NOT NULL,
+                instances_json TEXT NOT NULL DEFAULT '{}',
+                PRIMARY KEY (session_id, asset_id)
+            )
+        """)
 
 
 def _db_save(inst: dict) -> None:
@@ -88,6 +111,32 @@ def _db_load() -> list[dict]:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         return [dict(r) for r in conn.execute("SELECT * FROM instances ORDER BY rowid")]
+
+
+def _db_session_create(session_id: str, instance_names: dict) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO pipeline_sessions (id, started_at, instances_json) VALUES (?, ?, ?)",
+            (session_id, time.time(), json.dumps(instance_names)),
+        )
+
+
+def _db_session_stop(session_id: str) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE pipeline_sessions SET stopped_at=? WHERE id=?",
+                     (time.time(), session_id))
+
+
+def _db_entry_upsert(session_id: str, entry: dict) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO pipeline_entries
+               (session_id, asset_id, policy_id, asset_name, fingerprint, tx_hash, included_at, detected_at, instances_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, entry["asset_id"], entry.get("policy_id", ""), entry.get("asset_name", ""),
+             entry.get("fingerprint"), entry.get("tx_hash", ""), entry.get("included_at", ""),
+             entry["detected_at"], json.dumps(entry.get("instances", {}))),
+        )
 
 
 # ── lifecycle ──────────────────────────────────────────────────────────────
@@ -319,6 +368,8 @@ async def _pipeline_loop() -> None:
                 pipeline["entries"].insert(0, entry)
                 if len(pipeline["entries"]) > 200:
                     pipeline["entries"].pop()
+                if pipeline.get("session_id"):
+                    _db_entry_upsert(pipeline["session_id"], entry)
 
             if not pipeline["initialized"]:
                 pipeline["initialized"] = True
@@ -343,11 +394,16 @@ async def _pipeline_loop() -> None:
                     continue
                 assets_list = data.get("assets", [])
                 if assets_list:
+                    changed = False
                     if idata["asset_appeared_at"] is None:
                         idata["asset_appeared_at"] = now
+                        changed = True
                     a = assets_list[0]
                     if idata["metadata_appeared_at"] is None and (a.get("name") or a.get("description")):
                         idata["metadata_appeared_at"] = now
+                        changed = True
+                    if changed and pipeline.get("session_id"):
+                        _db_entry_upsert(pipeline["session_id"], entry)
 
         await asyncio.sleep(10)
 
@@ -582,6 +638,9 @@ async def pipeline_get():
 async def pipeline_start():
     if pipeline["running"]:
         return {"ok": True}
+    session_id = str(uuid.uuid4())[:8]
+    pipeline["session_id"] = session_id
+    _db_session_create(session_id, {iid: inst["name"] for iid, inst in instances.items()})
     pipeline["running"] = True
     pipeline["task"] = asyncio.create_task(_pipeline_loop())
     return {"ok": True}
@@ -593,6 +652,9 @@ async def pipeline_stop():
     if pipeline["task"]:
         pipeline["task"].cancel()
         pipeline["task"] = None
+    if pipeline["session_id"]:
+        _db_session_stop(pipeline["session_id"])
+    pipeline["session_id"] = None
     return {"ok": True}
 
 
@@ -601,7 +663,61 @@ async def pipeline_clear():
     pipeline["entries"] = []
     pipeline["known"] = set()
     pipeline["initialized"] = False
+    pipeline["session_id"] = None
     return {"ok": True}
+
+
+@app.get("/api/pipeline/sessions")
+async def pipeline_sessions_list():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT s.id, s.started_at, s.stopped_at, s.instances_json, COUNT(e.asset_id) as entry_count "
+            "FROM pipeline_sessions s LEFT JOIN pipeline_entries e ON e.session_id = s.id "
+            "GROUP BY s.id ORDER BY s.started_at DESC LIMIT 50"
+        ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "started_at": r["started_at"],
+            "stopped_at": r["stopped_at"],
+            "instances": json.loads(r["instances_json"]),
+            "entry_count": r["entry_count"],
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/pipeline/sessions/{sid}")
+async def pipeline_session_detail(sid: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        sess = conn.execute("SELECT * FROM pipeline_sessions WHERE id=?", (sid,)).fetchone()
+        if not sess:
+            raise HTTPException(404, "Session not found")
+        entries = conn.execute(
+            "SELECT * FROM pipeline_entries WHERE session_id=? ORDER BY detected_at DESC",
+            (sid,)
+        ).fetchall()
+    return {
+        "id": sess["id"],
+        "started_at": sess["started_at"],
+        "stopped_at": sess["stopped_at"],
+        "instances": json.loads(sess["instances_json"]),
+        "entries": [
+            {
+                "asset_id": e["asset_id"],
+                "policy_id": e["policy_id"],
+                "asset_name": e["asset_name"],
+                "fingerprint": e["fingerprint"],
+                "tx_hash": e["tx_hash"],
+                "included_at": e["included_at"],
+                "detected_at": e["detected_at"],
+                "instances": json.loads(e["instances_json"]),
+            }
+            for e in entries
+        ],
+    }
 
 
 if __name__ == "__main__":
