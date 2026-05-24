@@ -2,35 +2,69 @@
 Cardano GraphQL load test scenarios.
 
 Environment variables:
-  LOAD_PROFILE   light | full (default: full)
-  GQL_PAYMENT_ADDRESS  address to use for payment address queries
-  GQL_TX_HASH          tx hash for transaction queries
-  GQL_STAKE_ADDRESS    stake address for delegation/rewards queries
+  QUERY_GROUPS   comma-separated groups to run: general,assets,transactions,addresses,staking
+                 (default: all groups)
 """
 from __future__ import annotations
 
-import json
 import os
+import random
 from locust import HttpUser, between, task
 
-
-PROFILE = os.environ.get("LOAD_PROFILE", "full")
-PAYMENT_ADDRESS = os.environ.get(
-    "GQL_PAYMENT_ADDRESS",
-    "addr1qx2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer3n0d3vllmyqwsx5wktcd8cc3sq835lu7drv2xwl2wywfgse35a3x",
-)
-TX_HASH = os.environ.get(
-    "GQL_TX_HASH",
-    "5f20df933584822601f9e3f8c024eb5eb252fe8cefb24d1317dc3d432e940ebb",
-)
-STAKE_ADDRESS = os.environ.get(
-    "GQL_STAKE_ADDRESS",
-    "stake1uyehkck0lajq8gr28t9uxnuvgcqrc6070x3k9r8048z8y5gh6ffgw",
-)
+GROUPS = set(os.environ.get("QUERY_GROUPS", "general,assets,transactions,addresses,staking").split(","))
 
 
 class CardanoGraphQLUser(HttpUser):
     wait_time = between(0.5, 2)
+
+    def on_start(self):
+        self._tx_pool: list[str] = []
+        self._addr_pool: list[str] = []
+        self._asset_pool: list[tuple[str, str]] = []  # (fingerprint, policyId)
+        self._req_count = 0
+        self._refresh_pools()
+
+    def _refresh_pools(self):
+        r = self.gql(
+            "~discovery.txs",
+            "{ transactions(limit: 50, order_by: { includedAt: desc }) { hash inputs { address } } }",
+        )
+        if r:
+            txs = r.get("data", {}).get("transactions", [])
+            self._tx_pool = [t["hash"] for t in txs if t.get("hash")]
+            self._addr_pool = [
+                inp["address"]
+                for t in txs
+                for inp in t.get("inputs", [])
+                if inp.get("address")
+            ]
+
+        r = self.gql(
+            "~discovery.mints",
+            """{ tokenMints(limit: 50, order_by: { transaction: { includedAt: desc } }) {
+              asset { fingerprint policyId }
+            } }""",
+        )
+        if r:
+            self._asset_pool = [
+                (m["asset"]["fingerprint"], m["asset"].get("policyId", ""))
+                for m in r.get("data", {}).get("tokenMints", [])
+                if m.get("asset", {}).get("fingerprint")
+            ]
+
+    def _tick(self):
+        self._req_count += 1
+        if self._req_count % 50 == 0:
+            self._refresh_pools()
+
+    def _rand_tx(self) -> str:
+        return random.choice(self._tx_pool) if self._tx_pool else ""
+
+    def _rand_addr(self) -> str:
+        return random.choice(self._addr_pool) if self._addr_pool else ""
+
+    def _rand_asset(self) -> tuple[str, str]:
+        return random.choice(self._asset_pool) if self._asset_pool else ("", "")
 
     def gql(self, name: str, query: str, variables: dict | None = None) -> dict | None:
         with self.client.post(
@@ -53,10 +87,12 @@ class CardanoGraphQLUser(HttpUser):
             resp.success()
             return data
 
-    # ── Lightweight queries (always included) ──────────────────────────────
+    # ── general ────────────────────────────────────────────────────────────
 
     @task(5)
     def chain_tip(self):
+        if "general" not in GROUPS:
+            return
         self.gql(
             "cardano.tip",
             "{ cardano { tip { slotNo number forgedAt epoch { number } } } }",
@@ -64,6 +100,8 @@ class CardanoGraphQLUser(HttpUser):
 
     @task(4)
     def db_meta(self):
+        if "general" not in GROUPS:
+            return
         self.gql(
             "cardanoDbMeta",
             "{ cardanoDbMeta { initialized syncPercentage } }",
@@ -71,6 +109,8 @@ class CardanoGraphQLUser(HttpUser):
 
     @task(3)
     def recent_blocks(self):
+        if "general" not in GROUPS:
+            return
         self.gql(
             "blocks.recent",
             "{ blocks(limit: 5, order_by: { number: desc }) { number hash slotNo transactionsCount } }",
@@ -78,45 +118,95 @@ class CardanoGraphQLUser(HttpUser):
 
     @task(3)
     def epoch_info(self):
+        if "general" not in GROUPS:
+            return
         self.gql(
             "epochs.latest",
             "{ epochs(limit: 1, order_by: { number: desc }) { number blocksCount transactionsCount output fees startedAt } }",
         )
 
     @task(2)
-    def assets_list(self):
-        self.gql(
-            "assets.list",
-            "{ assets(limit: 10) { fingerprint policyId assetName name decimals } }",
-        )
-
-    @task(2)
     def ada_supply(self):
+        if "general" not in GROUPS:
+            return
         self.gql(
             "ada.supply",
             "{ ada { supply { circulating max total } } }",
         )
 
-    # ── Full queries (skipped in light profile) ────────────────────────────
+    # ── assets ─────────────────────────────────────────────────────────────
 
-    @task(2)
-    def payment_address(self):
-        if PROFILE == "light":
+    @task(3)
+    def asset_list(self):
+        if "assets" not in GROUPS:
             return
         self.gql(
-            "paymentAddress.summary",
-            """query($addr: String!) {
-              paymentAddresses(addresses: [$addr]) {
-                summary { assetBalances { quantity asset { fingerprint } } }
-              }
-            }""",
-            {"addr": PAYMENT_ADDRESS},
+            "assets.list",
+            "{ assets(limit: 10) { fingerprint policyId assetName name decimals } }",
         )
 
-    @task(1)
-    def transaction_by_hash(self):
-        if PROFILE == "light":
+    @task(4)
+    def asset_by_fingerprint(self):
+        if "assets" not in GROUPS:
             return
+        fp, _ = self._rand_asset()
+        if not fp:
+            return
+        self._tick()
+        self.gql(
+            "assets.byFingerprint",
+            """query($fp: AssetFingerprint!) {
+              assets(where: { fingerprint: { _eq: $fp } }) {
+                fingerprint policyId assetName name decimals description metadataHash
+                tokenMints(limit: 5, order_by: { transaction: { includedAt: desc } }) {
+                  quantity transaction { hash includedAt }
+                }
+              }
+            }""",
+            {"fp": fp},
+        )
+
+    @task(2)
+    def asset_by_policy(self):
+        if "assets" not in GROUPS:
+            return
+        _, policy = self._rand_asset()
+        if not policy:
+            return
+        self._tick()
+        self.gql(
+            "assets.byPolicy",
+            """query($policy: Hash28Hex!) {
+              assets(where: { policyId: { _eq: $policy } }) {
+                fingerprint assetName name decimals
+              }
+            }""",
+            {"policy": policy},
+        )
+
+    @task(3)
+    def token_mints_recent(self):
+        if "assets" not in GROUPS:
+            return
+        self.gql(
+            "tokenMints.recent",
+            """{ tokenMints(limit: 10, order_by: { transaction: { includedAt: desc } }) {
+              quantity
+              asset { fingerprint assetName name policyId }
+              transaction { hash includedAt }
+            } }""",
+        )
+
+    # ── transactions ───────────────────────────────────────────────────────
+
+    @task(2)
+    def transaction_by_hash(self):
+        if "transactions" not in GROUPS:
+            return
+        h = self._rand_tx()
+        if not h:
+            return
+        self._tick()
         self.gql(
             "transactions.byHash",
             """query($hash: Hash32Hex!) {
@@ -124,25 +214,48 @@ class CardanoGraphQLUser(HttpUser):
                 hash fee size includedAt
                 inputs { address value }
                 outputs { address value }
+                mint { asset { fingerprint assetName } quantity }
               }
             }""",
-            {"hash": TX_HASH},
+            {"hash": h},
         )
+
+    # ── addresses ──────────────────────────────────────────────────────────
+
+    @task(2)
+    def payment_address(self):
+        if "addresses" not in GROUPS:
+            return
+        addr = self._rand_addr()
+        if not addr:
+            return
+        self._tick()
+        self.gql(
+            "paymentAddress.summary",
+            """query($addr: String!) {
+              paymentAddresses(addresses: [$addr]) {
+                summary { assetBalances { quantity asset { fingerprint name } } }
+              }
+            }""",
+            {"addr": addr},
+        )
+
+    # ── staking ────────────────────────────────────────────────────────────
 
     @task(1)
     def delegations(self):
-        if PROFILE == "light":
+        if "staking" not in GROUPS:
             return
         self.gql(
             "delegations.sample",
-            "{ delegations(limit: 10, order_by: { transaction: { includedAt: desc } }) { stakeAddress { address } } }",
+            "{ delegations(limit: 10, order_by: { transaction: { includedAt: desc } }) { address stakePoolId } }",
         )
 
     @task(1)
     def stake_pools(self):
-        if PROFILE == "light":
+        if "staking" not in GROUPS:
             return
         self.gql(
             "stakePools.list",
-            "{ stakePools(limit: 5) { id pledge margin cost } }",
+            "{ stakePools(limit: 5) { id pledge margin fixedCost } }",
         )

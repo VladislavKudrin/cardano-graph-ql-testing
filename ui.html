@@ -115,7 +115,35 @@ button{cursor:pointer;border:none;border-radius:6px;font-size:.875em;font-weight
 .modal h2{font-size:1em;margin-bottom:16px}
 .modal-fields{display:grid;gap:12px;margin-bottom:18px}
 .modal-actions{display:flex;gap:8px;justify-content:flex-end}
+.modal-wide{width:min(700px,95vw)}
 .hidden{display:none}
+
+/* Errors modal */
+.err-row{margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--border)}
+.err-row:last-child{border-bottom:none;margin-bottom:0;padding-bottom:0}
+.err-name{font-family:monospace;color:var(--accent);font-size:.9em;margin-bottom:4px}
+.err-msg{background:var(--surface2);border-radius:6px;padding:10px 12px;font-family:monospace;
+  font-size:.8em;color:var(--red);word-break:break-word;white-space:pre-wrap;max-height:200px;overflow-y:auto}
+.err-count{font-size:.75em;color:var(--muted);margin-top:4px}
+.fail-btn{background:none;border:none;color:var(--red);cursor:pointer;font-size:inherit;
+  font-weight:700;padding:0;text-decoration:underline dotted;font-family:inherit}
+
+/* Pipeline monitor */
+.pipeline{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:20px}
+.pipeline-header{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.pipeline-header h2{font-size:.95em;flex:1}
+.pipeline-table{width:100%;border-collapse:collapse;font-size:.8em;overflow-x:auto;display:block}
+.pipeline-table th{padding:7px 12px;text-align:left;color:var(--muted);font-size:.72em;text-transform:uppercase;
+  letter-spacing:.04em;border-bottom:1px solid var(--border);white-space:nowrap}
+.pipeline-table td{padding:7px 12px;border-bottom:1px solid var(--surface2);white-space:nowrap;vertical-align:middle}
+.pipeline-table tbody tr:hover{background:var(--surface2)}
+.lag-pending{color:var(--yellow);animation:pulse 1.5s infinite}
+.lag-ok{color:var(--green);font-weight:600}
+.lag-none{color:var(--muted);font-style:italic}
+.assetid{font-family:monospace;font-size:.85em;color:var(--accent)}
+.pill{display:inline-block;padding:1px 7px;border-radius:10px;font-size:.75em;font-weight:600}
+.pill-run{background:rgba(34,197,94,.15);color:var(--green)}
+.pill-stop{background:rgba(139,146,176,.15);color:var(--muted)}
 
 /* Empty state */
 .empty{text-align:center;padding:60px 24px;color:var(--muted)}
@@ -144,11 +172,42 @@ button{cursor:pointer;border:none;border-radius:6px;font-size:.875em;font-weight
       </table>
     </div>
   </div>
+  <!-- Pipeline Monitor -->
+  <div class="pipeline" id="pipelineSection">
+    <div class="pipeline-header">
+      <h2>⛓ Pipeline Monitor</h2>
+      <span class="pill pill-stop" id="pipelineStatus">STOPPED</span>
+      <button class="btn-primary btn-sm" id="pipelineStartBtn" onclick="pipelineStart()">▶ Start</button>
+      <button class="btn-danger btn-sm hidden" id="pipelineStopBtn" onclick="pipelineStop()">⏹ Stop</button>
+      <button class="btn-ghost btn-sm" onclick="pipelineClear()">↺ Clear</button>
+      <span style="font-size:.75em;color:var(--muted);margin-left:4px">Detects new mints from db-sync · tracks when assets &amp; metadata appear in each instance</span>
+    </div>
+    <div style="overflow-x:auto">
+      <table class="pipeline-table" id="pipelineTable">
+        <thead id="pipelineThead"></thead>
+        <tbody id="pipelineTbody">
+          <tr><td colspan="99" style="text-align:center;color:var(--muted);padding:24px">Start the monitor to detect new mints.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
   <div class="empty hidden" id="emptyState">
     <div class="icon">🔬</div>
     <p>No test instances yet.<br>Add one to start load testing your GraphQL API.</p>
     <br>
     <button class="btn-primary" onclick="openAddModal()">+ Add Instance</button>
+  </div>
+</div>
+
+<!-- Errors Modal -->
+<div class="overlay hidden" id="errModal" onclick="if(event.target===this)closeErrModal()">
+  <div class="modal modal-wide">
+    <h2 id="errModalTitle">Failures</h2>
+    <div id="errModalBody" style="max-height:500px;overflow-y:auto"></div>
+    <div class="modal-actions" style="margin-top:16px">
+      <button class="btn-ghost" onclick="closeErrModal()">Close</button>
+    </div>
   </div>
 </div>
 
@@ -179,6 +238,7 @@ const state = {
   instances: {},      // id -> { meta, history, charts, pollTimer }
   modalMode: 'add',
   modalEditId: null,
+  failures: {},       // id -> [{ name, method, error, occurrences }]
 };
 
 // ── Chart.js defaults ────────────────────────────────────────────────────
@@ -292,9 +352,10 @@ function addInstanceCard(inst) {
   document.getElementById('instanceGrid').appendChild(el);
   document.getElementById('emptyState').classList.add('hidden');
 
-  state.instances[inst.id] = { meta: inst, lastSnap: null, pollTimer: null, charts: null };
   initCharts(inst.id);
   bindCardEvents(inst.id);
+
+  state.instances[inst.id] = { meta: inst, pollTimer: null, charts: null };
   startPolling(inst.id);
 }
 
@@ -326,31 +387,16 @@ function cardHTML(inst) {
       <label>Run time</label>
       <input id="cfg-time-${inst.id}" placeholder="∞  (e.g. 60s, 5m)" />
     </div>
-    <div>
-      <label>Query profile</label>
-      <select id="cfg-profile-${inst.id}">
-        <option value="full">Full</option>
-        <option value="light">Light (fast only)</option>
-      </select>
-    </div>
   </div>
-  <div>
-    <div class="config-toggle" onclick="toggleAdvanced('${inst.id}')">
-      <span id="adv-arrow-${inst.id}">▶</span> Advanced options
-    </div>
-    <div class="config-advanced hidden" id="adv-${inst.id}">
-      <div>
-        <label>Payment address</label>
-        <input id="cfg-addr-${inst.id}" placeholder="addr1q…" />
-      </div>
-      <div>
-        <label>TX hash</label>
-        <input id="cfg-tx-${inst.id}" placeholder="5f20df…" />
-      </div>
-      <div>
-        <label>Stake address</label>
-        <input id="cfg-stake-${inst.id}" placeholder="stake1u…" />
-      </div>
+  <div style="margin-top:10px">
+    <label style="margin-bottom:6px">Query groups</label>
+    <div style="display:flex;flex-wrap:wrap;gap:8px">
+      ${['general','assets','transactions','addresses','staking'].map(g => `
+        <label style="display:flex;align-items:center;gap:5px;font-size:.82em;color:var(--text);cursor:pointer">
+          <input type="checkbox" id="cfg-grp-${inst.id}-${g}" value="${g}" checked
+            style="width:auto;accent-color:var(--accent)" />
+          ${g}
+        </label>`).join('')}
     </div>
   </div>
 </div>
@@ -435,12 +481,6 @@ function bindCardEvents(id) {
   document.getElementById(`cfg-users-${id}`).addEventListener('keydown', e => { if(e.key==='Enter') startTest(id); });
 }
 
-function toggleAdvanced(id) {
-  const el = document.getElementById(`adv-${id}`);
-  const arrow = document.getElementById(`adv-arrow-${id}`);
-  const hidden = el.classList.toggle('hidden');
-  arrow.textContent = hidden ? '▶' : '▼';
-}
 
 // ── polling ────────────────────────────────────────────────────────────────
 function startPolling(id) {
@@ -464,7 +504,8 @@ function updateCard(id, data) {
   const inst = state.instances[id];
   if (!inst) return;
 
-  const { status, last_snap: snap, started_at, users_current } = data;
+  const { status, last_snap: snap, started_at, users_current, failures } = data;
+  if (failures) state.failures[id] = failures;
 
   // Status dot + label
   const dot = document.getElementById(`dot-${id}`);
@@ -497,11 +538,9 @@ function updateCard(id, data) {
 
   if (!snap) return;
 
-  inst.lastSnap = snap;
-
   // Metric tiles
   setText(`m-rps-${id}`, snap.rps.toFixed(2));
-  setText(`m-p95-${id}`, snap.p95 || snap.agg?.p95 || '—');
+  setText(`m-p95-${id}`, snap.p95 || '—');
   setText(`m-fail-${id}`, `${snap.fail_ratio}%`);
   const totalReqs = snap.agg ? snap.agg.reqs : 0;
   setText(`m-total-${id}`, totalReqs.toLocaleString());
@@ -518,14 +557,16 @@ function updateCard(id, data) {
   const tbody = document.getElementById(`qtable-${id}`);
   if (tbody && snap.per_query) {
     tbody.innerHTML = snap.per_query.map(q => {
-      const errColor = q.fails > 0 ? 'color:var(--red)' : '';
+      const failCell = q.fails > 0
+        ? `<button class="fail-btn" onclick="openErrModal('${id}','${esc(q.name)}')">${q.fails}</button>`
+        : '0';
       return `<tr>
         <td class="query-name">${esc(q.name)}</td>
         <td style="text-align:right">${q.rps.toFixed(2)}</td>
-        <td style="text-align:right">${q.p50}</td>
-        <td style="text-align:right">${q.p95}</td>
-        <td style="text-align:right">${q.p99}</td>
-        <td style="text-align:right;${errColor}">${q.fails}</td>
+        <td style="text-align:right">${q.p50 || '—'}</td>
+        <td style="text-align:right">${q.p95 || '—'}</td>
+        <td style="text-align:right">${q.p99 || '—'}</td>
+        <td style="text-align:right">${failCell}</td>
         <td style="text-align:right;color:var(--muted)">${q.reqs.toLocaleString()}</td>
       </tr>`;
     }).join('');
@@ -558,7 +599,7 @@ function updateComparison() {
   ];
 
   body.innerHTML = metrics.map(m => {
-    const vals = running.map(i => i.lastSnap?.[m.key] ?? i.meta[m.key] ?? null);
+    const vals = running.map(i => i.meta.last_snap?.[m.key] ?? i.meta[m.key] ?? null);
     const classes = m.colorFn ? m.colorFn(vals) : vals.map(() => '');
     return '<tr><td>' + m.label + '</td>' +
       vals.map((v, i) => {
@@ -583,16 +624,14 @@ async function startTest(id) {
   const users = parseInt(document.getElementById(`cfg-users-${id}`).value) || 5;
   const spawn_rate = parseFloat(document.getElementById(`cfg-spawn-${id}`).value) || 1;
   const run_time = document.getElementById(`cfg-time-${id}`).value.trim();
-  const load_profile = document.getElementById(`cfg-profile-${id}`).value;
-  const payment_address = document.getElementById(`cfg-addr-${id}`).value.trim();
-  const tx_hash = document.getElementById(`cfg-tx-${id}`).value.trim();
-  const stake_address = document.getElementById(`cfg-stake-${id}`).value.trim();
+  const query_groups = ['general','assets','transactions','addresses','staking']
+    .filter(g => document.getElementById(`cfg-grp-${id}-${g}`)?.checked);
 
   try {
     await apiFetch(`/instances/${id}/start`, {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ users, spawn_rate, run_time, load_profile, payment_address, tx_hash, stake_address })
+      body: JSON.stringify({ users, spawn_rate, run_time, query_groups })
     });
     if (state.instances[id]?.charts) {
       state.instances[id].charts.rps.data.labels = [];
@@ -675,10 +714,120 @@ function setText(id, val) {
   if (el) el.textContent = val;
 }
 
+// ── pipeline monitor ──────────────────────────────────────────────────────
+let _pipelineTimer = null;
+
+async function pipelineStart() {
+  await apiFetch('/pipeline/start', { method: 'POST' });
+  document.getElementById('pipelineStartBtn').classList.add('hidden');
+  document.getElementById('pipelineStopBtn').classList.remove('hidden');
+  document.getElementById('pipelineStatus').textContent = 'RUNNING';
+  document.getElementById('pipelineStatus').className = 'pill pill-run';
+  _pipelineTimer = setInterval(pipelinePoll, 5000);
+  pipelinePoll();
+}
+
+async function pipelineStop() {
+  await apiFetch('/pipeline/stop', { method: 'POST' });
+  document.getElementById('pipelineStartBtn').classList.remove('hidden');
+  document.getElementById('pipelineStopBtn').classList.add('hidden');
+  document.getElementById('pipelineStatus').textContent = 'STOPPED';
+  document.getElementById('pipelineStatus').className = 'pill pill-stop';
+  clearInterval(_pipelineTimer);
+}
+
+async function pipelineClear() {
+  await apiFetch('/pipeline/clear', { method: 'POST' });
+  pipelineRender({ running: document.getElementById('pipelineStopBtn').classList.contains('hidden') ? false : true, entries: [] });
+}
+
+async function pipelinePoll() {
+  try {
+    const data = await apiFetch('/pipeline');
+    pipelineRender(data);
+  } catch(_) {}
+}
+
+function pipelineRender(data) {
+  const entries = data.entries || [];
+  const instIds = Object.keys(state.instances);
+
+  // Build header
+  const thead = document.getElementById('pipelineThead');
+  let headerHTML = '<tr><th>Asset ID</th><th>Policy</th><th>Included at</th><th>Detected</th>';
+  instIds.forEach(iid => {
+    const name = esc(state.instances[iid]?.meta?.name || iid);
+    headerHTML += `<th>${name} — asset lag</th><th>${name} — metadata lag</th>`;
+  });
+  thead.innerHTML = headerHTML + '</tr>';
+
+  // Build rows
+  const tbody = document.getElementById('pipelineTbody');
+  if (entries.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="99" style="text-align:center;color:var(--muted);padding:24px">No new mints detected yet.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = entries.map(e => {
+    const shortId = e.asset_id ? e.asset_id.substring(0, 16) + '…' : '—';
+    const shortPolicy = e.policy_id ? e.policy_id.substring(0, 12) + '…' : '—';
+    const includedAt = e.included_at ? new Date(e.included_at).toLocaleTimeString() : '—';
+    const detectedAt = e.detected_at ? new Date(e.detected_at * 1000).toLocaleTimeString() : '—';
+
+    let cells = `<td class="assetid" title="${esc(e.asset_id)}">${shortId}</td>`;
+    cells += `<td class="assetid" title="${esc(e.policy_id)}">${shortPolicy}</td>`;
+    cells += `<td>${includedAt}</td>`;
+    cells += `<td>${detectedAt}</td>`;
+
+    instIds.forEach(iid => {
+      const idata = (e.instances || {})[iid];
+      cells += `<td>${lagCell(idata?.asset_appeared_at, e.detected_at)}</td>`;
+      cells += `<td>${lagCell(idata?.metadata_appeared_at, e.detected_at, idata?.asset_appeared_at)}</td>`;
+    });
+
+    return `<tr>${cells}</tr>`;
+  }).join('');
+}
+
+function lagCell(appeared_at, detected_at, prereq_at) {
+  if (!detected_at) return '<span class="lag-none">—</span>';
+  if (prereq_at === null) return '<span class="lag-none">asset pending</span>';
+  if (!appeared_at) return '<span class="lag-pending">pending…</span>';
+  const secs = (appeared_at - detected_at).toFixed(1);
+  return `<span class="lag-ok">+${secs}s</span>`;
+}
+
+// ── errors modal ──────────────────────────────────────────────────────────
+function openErrModal(id, filterName) {
+  const instName = state.instances[id]?.meta?.name || id;
+  const all = state.failures[id] || [];
+  const rows = filterName ? all.filter(f => f.name === filterName) : all;
+
+  document.getElementById('errModalTitle').textContent =
+    filterName ? `Failures — ${filterName} (${instName})` : `All failures — ${instName}`;
+
+  if (rows.length === 0) {
+    document.getElementById('errModalBody').innerHTML =
+      '<p style="color:var(--muted);font-size:.9em">No failure details yet.</p>';
+  } else {
+    document.getElementById('errModalBody').innerHTML = rows.map(f => `
+      <div class="err-row">
+        <div class="err-name">${esc(f.name)}</div>
+        <div class="err-msg">${esc(f.error)}</div>
+        <div class="err-count">${f.occurrences.toLocaleString()} occurrence${f.occurrences !== 1 ? 's' : ''}</div>
+      </div>`).join('');
+  }
+  document.getElementById('errModal').classList.remove('hidden');
+}
+
+function closeErrModal() {
+  document.getElementById('errModal').classList.add('hidden');
+}
+
 // ── keyboard shortcuts ────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') closeModal();
-  if (e.key === 'n' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); openAddModal(); }
+  if (e.key === 'Escape') { closeModal(); closeErrModal(); }
+  if ((e.key === 'n' || e.key === 'N') && (e.metaKey || e.ctrlKey)) { e.preventDefault(); openAddModal(); }
 });
 
 // ── init ───────────────────────────────────────────────────────────────────

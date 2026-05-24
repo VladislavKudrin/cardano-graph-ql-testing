@@ -36,6 +36,25 @@ DB_PATH = Path(__file__).parent / "instances.db"
 instances: dict[str, dict[str, Any]] = {}
 _poll_tasks: dict[str, asyncio.Task] = {}
 
+pipeline: dict[str, Any] = {
+    "running": False,
+    "task": None,
+    "entries": [],
+    "known": set(),
+}
+
+_MINT_QUERY = """{ tokenMints(limit: 30, order_by: { transaction: { includedAt: desc } }) {
+  asset { assetId policyId assetName fingerprint }
+  quantity
+  transaction { hash includedAt }
+} }"""
+
+_ASSET_CHECK_QUERY = """query($id: Hex!) {
+  assets(where: { assetId: { _eq: $id } }) {
+    assetId fingerprint name description decimals metadataHash
+  }
+}"""
+
 
 # ── sqlite helpers ─────────────────────────────────────────────────────────
 
@@ -88,10 +107,13 @@ async def lifespan(_app: FastAPI):
             "users_current": 0,
             "started_at": None,
             "last_config": {},
+            "failures": [],
         }
     yield
     for inst in list(instances.values()):
         _kill(inst)
+    if pipeline["task"]:
+        pipeline["task"].cancel()
 
 
 app = FastAPI(title="graphql-perf", lifespan=lifespan)
@@ -165,7 +187,10 @@ async def _poll(id: str) -> None:
         if inst["status"] not in ("running", "starting", "spawning"):
             break
 
-        data = await _locust_get(inst["port"], "/stats/requests")
+        data, failures_data = await asyncio.gather(
+            _locust_get(inst["port"], "/stats/requests"),
+            _locust_get(inst["port"], "/stats/failures"),
+        )
         if data:
             ts = time.time()
             state = data.get("state", "")
@@ -179,7 +204,17 @@ async def _poll(id: str) -> None:
 
             stats = data.get("stats", [])
             agg = next((s for s in stats if s.get("name") == "Aggregated"), None)
-            per_query = [s for s in stats if s.get("name") != "Aggregated"]
+            per_query = [s for s in stats if s.get("name") != "Aggregated" and not s.get("name", "").startswith("~")]
+
+            failures = []
+            if failures_data:
+                for f in failures_data.get("failures", []):
+                    failures.append({
+                        "name": f.get("name", ""),
+                        "method": f.get("method", ""),
+                        "error": f.get("error", ""),
+                        "occurrences": f.get("occurrences", 0),
+                    })
 
             snap = {
                 "ts": ts,
@@ -192,9 +227,10 @@ async def _poll(id: str) -> None:
                 "per_query": [_fmt_stat(s) for s in per_query],
             }
             inst["history"].append(snap)
-            if len(inst["history"]) > 1800:   # 1h at 2s intervals
+            if len(inst["history"]) > 1800:
                 inst["history"].pop(0)
             inst["last_snap"] = snap
+            inst["failures"] = failures
 
         await asyncio.sleep(2)
 
@@ -219,6 +255,86 @@ def _fmt_stat(s: dict) -> dict:
     }
 
 
+# ── pipeline monitor ──────────────────────────────────────────────────────
+
+async def _gql(url: str, query: str, variables: dict | None = None) -> dict | None:
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.post(
+                f"{url}/graphql",
+                json={"query": query, "variables": variables or {}},
+                timeout=10,
+            )
+            data = r.json()
+            if data.get("errors"):
+                return None
+            return data.get("data")
+    except Exception:
+        return None
+
+
+async def _pipeline_loop() -> None:
+    while pipeline["running"]:
+        current = list(instances.values())
+
+        for inst in current:
+            data = await _gql(inst["url"], _MINT_QUERY)
+            if not data:
+                continue
+            for mint in data.get("tokenMints", []):
+                asset = mint.get("asset") or {}
+                asset_id = asset.get("assetId")
+                qty = mint.get("quantity", "1")
+                if not asset_id or asset_id in pipeline["known"]:
+                    continue
+                try:
+                    if int(qty) < 0:
+                        pipeline["known"].add(asset_id)
+                        continue
+                except ValueError:
+                    pass
+                pipeline["known"].add(asset_id)
+                entry: dict[str, Any] = {
+                    "asset_id": asset_id,
+                    "policy_id": asset.get("policyId", ""),
+                    "asset_name": asset.get("assetName", ""),
+                    "fingerprint": asset.get("fingerprint"),
+                    "tx_hash": (mint.get("transaction") or {}).get("hash", ""),
+                    "included_at": (mint.get("transaction") or {}).get("includedAt", ""),
+                    "detected_at": time.time(),
+                    "instances": {},
+                }
+                pipeline["entries"].insert(0, entry)
+                if len(pipeline["entries"]) > 200:
+                    pipeline["entries"].pop()
+
+        for entry in pipeline["entries"][:50]:
+            for inst in list(instances.values()):
+                iid = inst["id"]
+                if iid not in entry["instances"]:
+                    entry["instances"][iid] = {
+                        "name": inst["name"],
+                        "asset_appeared_at": None,
+                        "metadata_appeared_at": None,
+                    }
+                idata = entry["instances"][iid]
+                if idata["asset_appeared_at"] and idata["metadata_appeared_at"]:
+                    continue
+                data = await _gql(inst["url"], _ASSET_CHECK_QUERY, {"id": entry["asset_id"]})
+                if not data:
+                    continue
+                assets_list = data.get("assets", [])
+                if assets_list:
+                    now = time.time()
+                    if idata["asset_appeared_at"] is None:
+                        idata["asset_appeared_at"] = now
+                    a = assets_list[0]
+                    if idata["metadata_appeared_at"] is None and (a.get("name") or a.get("description")):
+                        idata["metadata_appeared_at"] = now
+
+        await asyncio.sleep(10)
+
+
 # ── routes ────────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
@@ -231,14 +347,14 @@ class InstanceBody(BaseModel):
     url: str
 
 
+ALL_GROUPS = ["general", "assets", "transactions", "addresses", "staking"]
+
+
 class StartBody(BaseModel):
     users: int = 5
     spawn_rate: float = 1.0
-    run_time: str = ""          # e.g. "120s", "5m" — empty = run forever
-    load_profile: str = "full"  # "light" or "full"
-    payment_address: str = ""
-    tx_hash: str = ""
-    stake_address: str = ""
+    run_time: str = ""
+    query_groups: list[str] = ALL_GROUPS
 
 
 @app.get("/api/instances")
@@ -261,6 +377,7 @@ async def create_instance(body: InstanceBody):
         "users_current": 0,
         "started_at": None,
         "last_config": {},
+        "failures": [],
     }
     _db_save(instances[id])
     return _safe(instances[id])
@@ -300,13 +417,8 @@ async def start_instance(id: str, body: StartBody):
     if task:
         task.cancel()
 
-    env = {**os.environ, "LOAD_PROFILE": body.load_profile}
-    if body.payment_address:
-        env["GQL_PAYMENT_ADDRESS"] = body.payment_address
-    if body.tx_hash:
-        env["GQL_TX_HASH"] = body.tx_hash
-    if body.stake_address:
-        env["GQL_STAKE_ADDRESS"] = body.stake_address
+    groups = body.query_groups or ALL_GROUPS
+    env = {**os.environ, "QUERY_GROUPS": ",".join(groups)}
 
     cmd = [
         "locust",
@@ -323,6 +435,7 @@ async def start_instance(id: str, body: StartBody):
     inst["history"] = []
     inst["last_snap"] = None
     inst["users_current"] = 0
+    inst["failures"] = []
     inst["started_at"] = time.time()
     inst["last_config"] = body.model_dump()
 
@@ -399,7 +512,38 @@ async def get_metrics(id: str, tail: int = 150):
         "status": inst["status"],
         "users_current": inst["users_current"],
         "started_at": inst["started_at"],
+        "failures": inst.get("failures", []),
     }
+
+
+@app.get("/api/pipeline")
+async def pipeline_get():
+    return {"running": pipeline["running"], "entries": pipeline["entries"][:100]}
+
+
+@app.post("/api/pipeline/start")
+async def pipeline_start():
+    if pipeline["running"]:
+        return {"ok": True}
+    pipeline["running"] = True
+    pipeline["task"] = asyncio.create_task(_pipeline_loop())
+    return {"ok": True}
+
+
+@app.post("/api/pipeline/stop")
+async def pipeline_stop():
+    pipeline["running"] = False
+    if pipeline["task"]:
+        pipeline["task"].cancel()
+        pipeline["task"] = None
+    return {"ok": True}
+
+
+@app.post("/api/pipeline/clear")
+async def pipeline_clear():
+    pipeline["entries"] = []
+    pipeline["known"] = set()
+    return {"ok": True}
 
 
 if __name__ == "__main__":
