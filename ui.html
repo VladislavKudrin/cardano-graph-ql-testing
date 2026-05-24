@@ -130,8 +130,16 @@ button{cursor:pointer;border:none;border-radius:6px;font-size:.875em;font-weight
 
 /* Pipeline monitor */
 .pipeline{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:20px}
-.pipeline-header{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
-.pipeline-header h2{font-size:.95em;flex:1}
+.pipeline-header{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.pipeline-header h2{font-size:.95em}
+.pipeline-summary{display:flex;gap:8px;flex-wrap:wrap;flex:1}
+.psumm{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:7px 12px;min-width:130px}
+.psumm-name{color:var(--muted);font-size:.7em;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;font-weight:600}
+.psumm-row{display:flex;justify-content:space-between;gap:12px;font-size:.78em;margin-top:2px}
+.psumm-row span{color:var(--muted)}
+.psumm-row strong{color:var(--text)}
+.psumm-row strong.good{color:var(--green)}
+.psumm-row strong.warn{color:var(--yellow)}
 .pipeline-table{width:100%;border-collapse:collapse;font-size:.8em;overflow-x:auto;display:block}
 .pipeline-table th{padding:7px 12px;text-align:left;color:var(--muted);font-size:.72em;text-transform:uppercase;
   letter-spacing:.04em;border-bottom:1px solid var(--border);white-space:nowrap}
@@ -180,7 +188,8 @@ button{cursor:pointer;border:none;border-radius:6px;font-size:.875em;font-weight
       <button class="btn-primary btn-sm" id="pipelineStartBtn" onclick="pipelineStart()">▶ Start</button>
       <button class="btn-danger btn-sm hidden" id="pipelineStopBtn" onclick="pipelineStop()">⏹ Stop</button>
       <button class="btn-ghost btn-sm" onclick="pipelineClear()">↺ Clear</button>
-      <span style="font-size:.75em;color:var(--muted);margin-left:4px">Detects new mints from db-sync · tracks when assets &amp; metadata appear in each instance</span>
+      <div class="pipeline-summary" id="pipelineSummary"></div>
+      <span style="font-size:.73em;color:var(--muted)">Detects new mints · tracks asset &amp; metadata appearance lag per instance</span>
     </div>
     <div style="overflow-x:auto">
       <table class="pipeline-table" id="pipelineTable">
@@ -748,11 +757,33 @@ async function pipelinePoll() {
   } catch(_) {}
 }
 
+const META_TIMEOUT = 600;
+
 function pipelineRender(data) {
   const entries = data.entries || [];
+  const summary = data.summary || {};
   const instIds = Object.keys(state.instances);
 
-  // Build header
+  // Summary cards
+  const summaryEl = document.getElementById('pipelineSummary');
+  if (summaryEl && Object.keys(summary).length) {
+    summaryEl.innerHTML = instIds.map(iid => {
+      const s = summary[iid];
+      if (!s) return '';
+      const assetAvg = s.asset_avg != null ? `${s.asset_avg}s` : '—';
+      const metaAvg = s.meta_avg != null ? `${s.meta_avg}s` : '—';
+      return `<div class="psumm">
+        <div class="psumm-name">${esc(s.name)}</div>
+        <div class="psumm-row"><span>Detected</span><strong>${s.total}</strong></div>
+        <div class="psumm-row"><span>Asset avg</span><strong class="${s.asset_avg != null ? 'good' : ''}">${assetAvg}</strong></div>
+        <div class="psumm-row"><span>Asset pending</span><strong class="${s.pending_asset > 0 ? 'warn' : ''}">${s.pending_asset}</strong></div>
+        <div class="psumm-row"><span>Meta avg</span><strong class="${s.meta_avg != null ? 'good' : ''}">${metaAvg}</strong></div>
+        <div class="psumm-row"><span>No metadata</span><strong>${s.no_meta}</strong></div>
+      </div>`;
+    }).join('');
+  }
+
+  // Table header
   const thead = document.getElementById('pipelineThead');
   let headerHTML = '<tr><th>Asset ID</th><th>Policy</th><th>Included at</th><th>Detected</th>';
   instIds.forEach(iid => {
@@ -761,10 +792,13 @@ function pipelineRender(data) {
   });
   thead.innerHTML = headerHTML + '</tr>';
 
-  // Build rows
+  // Rows
   const tbody = document.getElementById('pipelineTbody');
   if (entries.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="99" style="text-align:center;color:var(--muted);padding:24px">No new mints detected yet.</td></tr>';
+    const msg = data.initialized === false
+      ? 'Baselining current mints… new assets will appear here.'
+      : 'No new mints detected yet.';
+    tbody.innerHTML = `<tr><td colspan="99" style="text-align:center;color:var(--muted);padding:24px">${msg}</td></tr>`;
     return;
   }
 
@@ -776,8 +810,7 @@ function pipelineRender(data) {
 
     let cells = `<td class="assetid" title="${esc(e.asset_id)}">${shortId}</td>`;
     cells += `<td class="assetid" title="${esc(e.policy_id)}">${shortPolicy}</td>`;
-    cells += `<td>${includedAt}</td>`;
-    cells += `<td>${detectedAt}</td>`;
+    cells += `<td>${includedAt}</td><td>${detectedAt}</td>`;
 
     instIds.forEach(iid => {
       const idata = (e.instances || {})[iid];
@@ -791,7 +824,12 @@ function pipelineRender(data) {
 
 function lagCell(appeared_at, detected_at, prereq_at) {
   if (!detected_at) return '<span class="lag-none">—</span>';
-  if (prereq_at === null) return '<span class="lag-none">asset pending</span>';
+  if (prereq_at !== undefined) {
+    if (!prereq_at) return '<span class="lag-none">asset pending</span>';
+    if (!appeared_at && (Date.now() / 1000 - prereq_at) > META_TIMEOUT) {
+      return '<span class="lag-none">—</span>';
+    }
+  }
   if (!appeared_at) return '<span class="lag-pending">pending…</span>';
   const secs = (appeared_at - detected_at).toFixed(1);
   return `<span class="lag-ok">+${secs}s</span>`;
