@@ -44,7 +44,7 @@ pipeline: dict[str, Any] = {
     "initialized": False,  # first poll baselines known without creating entries
 }
 
-_MINT_QUERY = """{ tokenMints(limit: 30, order_by: { transaction: { includedAt: desc } }) {
+_MINT_QUERY = """{ tokenMints(limit: 30, order_by: { transaction: { includedAt: desc } }, where: { asset: { assetId: { _is_null: false } } }) {
   asset { assetId policyId assetName fingerprint }
   quantity
   transaction { hash includedAt }
