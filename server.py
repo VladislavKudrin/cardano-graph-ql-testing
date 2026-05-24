@@ -600,6 +600,7 @@ async def pipeline_get():
         iid = inst["id"]
         asset_lags = []
         meta_lags = []
+        instant = 0
         pending_asset = 0
         pending_meta = 0
         for e in entries:
@@ -608,7 +609,11 @@ async def pipeline_get():
                 continue
             det = e.get("detected_at", now)
             if idata["asset_appeared_at"]:
-                asset_lags.append(idata["asset_appeared_at"] - det)
+                lag = idata["asset_appeared_at"] - det
+                if lag < 1:
+                    instant += 1
+                else:
+                    asset_lags.append(lag)
                 if idata["metadata_appeared_at"]:
                     meta_lags.append(idata["metadata_appeared_at"] - det)
                 else:
@@ -622,6 +627,7 @@ async def pipeline_get():
             "meta_avg": round(sum(meta_lags) / len(meta_lags), 1) if meta_lags else None,
             "asset_resolved": len(asset_lags),
             "meta_resolved": len(meta_lags),
+            "instant": instant,
             "pending_asset": pending_asset,
             "pending_meta": pending_meta,
         }
