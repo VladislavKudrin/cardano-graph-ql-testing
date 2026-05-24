@@ -130,16 +130,17 @@ button{cursor:pointer;border:none;border-radius:6px;font-size:.875em;font-weight
 
 /* Pipeline monitor */
 .pipeline{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:20px}
-.pipeline-header{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.pipeline-header h2{font-size:.95em}
-.pipeline-summary{display:flex;gap:8px;flex-wrap:wrap;flex:1}
-.psumm{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:7px 12px;min-width:130px}
-.psumm-name{color:var(--muted);font-size:.7em;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;font-weight:600}
-.psumm-row{display:flex;justify-content:space-between;gap:12px;font-size:.78em;margin-top:2px}
-.psumm-row span{color:var(--muted)}
-.psumm-row strong{color:var(--text)}
-.psumm-row strong.good{color:var(--green)}
-.psumm-row strong.warn{color:var(--yellow)}
+.pipeline-header{padding:14px 18px;border-bottom:1px solid var(--border)}
+.pipeline-header-top{display:flex;align-items:center;gap:10px}
+.pipeline-header-top h2{font-size:.95em;flex:1}
+.pipeline-summary{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.psumm{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:6px 14px;display:flex;align-items:center;gap:16px}
+.psumm-name{color:var(--muted);font-size:.72em;text-transform:uppercase;letter-spacing:.05em;font-weight:700;padding-right:4px;border-right:1px solid var(--border)}
+.psumm-stat{display:flex;flex-direction:column;align-items:center;gap:1px;font-size:.75em}
+.psumm-stat span{color:var(--muted);font-size:.85em}
+.psumm-stat strong{color:var(--text)}
+.psumm-stat strong.good{color:var(--green)}
+.psumm-stat strong.warn{color:var(--yellow)}
 .pipeline-table{width:100%;border-collapse:collapse;font-size:.8em;overflow-x:auto;display:block}
 .pipeline-table th{padding:7px 12px;text-align:left;color:var(--muted);font-size:.72em;text-transform:uppercase;
   letter-spacing:.04em;border-bottom:1px solid var(--border);white-space:nowrap}
@@ -183,13 +184,15 @@ button{cursor:pointer;border:none;border-radius:6px;font-size:.875em;font-weight
   <!-- Pipeline Monitor -->
   <div class="pipeline" id="pipelineSection">
     <div class="pipeline-header">
-      <h2>⛓ Pipeline Monitor</h2>
-      <span class="pill pill-stop" id="pipelineStatus">STOPPED</span>
-      <button class="btn-primary btn-sm" id="pipelineStartBtn" onclick="pipelineStart()">▶ Start</button>
-      <button class="btn-danger btn-sm hidden" id="pipelineStopBtn" onclick="pipelineStop()">⏹ Stop</button>
-      <button class="btn-ghost btn-sm" onclick="pipelineClear()">↺ Clear</button>
+      <div class="pipeline-header-top">
+        <h2>⛓ Pipeline Monitor</h2>
+        <span class="pill pill-stop" id="pipelineStatus">STOPPED</span>
+        <button class="btn-primary btn-sm" id="pipelineStartBtn" onclick="pipelineStart()">▶ Start</button>
+        <button class="btn-danger btn-sm hidden" id="pipelineStopBtn" onclick="pipelineStop()">⏹ Stop</button>
+        <button class="btn-ghost btn-sm" onclick="pipelineClear()">↺ Clear</button>
+        <span style="font-size:.73em;color:var(--muted)">Detects new mints · tracks asset &amp; metadata lag per instance</span>
+      </div>
       <div class="pipeline-summary" id="pipelineSummary"></div>
-      <span style="font-size:.73em;color:var(--muted)">Detects new mints · tracks asset &amp; metadata appearance lag per instance</span>
     </div>
     <div style="overflow-x:auto">
       <table class="pipeline-table" id="pipelineTable">
@@ -771,11 +774,11 @@ function pipelineRender(data) {
       const assetAvg = s.asset_avg != null ? `${s.asset_avg}s` : '—';
       const metaAvg = s.meta_avg != null ? `${s.meta_avg}s` : '—';
       return `<div class="psumm">
-        <div class="psumm-name">${esc(s.name)}</div>
-        <div class="psumm-row"><span>Detected</span><strong>${s.total}</strong></div>
-        <div class="psumm-row"><span>Asset avg</span><strong class="${s.asset_avg != null ? 'good' : ''}">${assetAvg}</strong></div>
-        <div class="psumm-row"><span>Asset pending</span><strong class="${s.pending_asset > 0 ? 'warn' : ''}">${s.pending_asset}</strong></div>
-        <div class="psumm-row"><span>Meta avg</span><strong class="${s.meta_avg != null ? 'good' : ''}">${metaAvg}</strong></div>
+        <span class="psumm-name">${esc(s.name)}</span>
+        <span class="psumm-stat"><span>detected</span><strong>${s.total}</strong></span>
+        <span class="psumm-stat"><span>asset avg</span><strong class="${s.asset_avg != null ? 'good' : ''}">${assetAvg}</strong></span>
+        <span class="psumm-stat"><span>asset pending</span><strong class="${s.pending_asset > 0 ? 'warn' : ''}">${s.pending_asset}</strong></span>
+        <span class="psumm-stat"><span>meta avg</span><strong class="${s.meta_avg != null ? 'good' : ''}">${metaAvg}</strong></span>
       </div>`;
     }).join('');
   }
