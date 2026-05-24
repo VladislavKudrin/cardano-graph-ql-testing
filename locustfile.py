@@ -190,7 +190,7 @@ class CardanoGraphQLUser(HttpUser):
             return
         self.gql(
             "tokenMints.recent",
-            """{ tokenMints(limit: 10, order_by: { transaction: { includedAt: desc } }) {
+            """{ tokenMints(limit: 10, order_by: { transaction: { includedAt: desc } }, where: { asset: {} }) {
               quantity
               asset { fingerprint assetName name policyId }
               transaction { hash includedAt }
@@ -248,7 +248,7 @@ class CardanoGraphQLUser(HttpUser):
             return
         self.gql(
             "delegations.sample",
-            "{ delegations(limit: 10, order_by: { transaction: { includedAt: desc } }) { address stakePoolId } }",
+            "{ delegations(limit: 10) { address stakePoolId } }",
         )
 
     @task(1)
