@@ -395,7 +395,6 @@ function addInstanceCard(inst) {
   state.instances[inst.id] = { meta: inst, pollTimer: null, charts: null };
   initCharts(inst.id);
   bindCardEvents(inst.id);
-  startPolling(inst.id);
 }
 
 function cardHTML(inst) {
@@ -487,7 +486,7 @@ function cardHTML(inst) {
 </div>
 
 <div id="docker-${inst.id}" style="display:none;padding:8px 16px 4px;border-top:1px solid var(--border)"></div>
-<div id="docker-summary-${inst.id}" style="display:none;padding:6px 16px;border-top:1px solid var(--border);display:none"></div>
+<div id="docker-summary-${inst.id}" style="display:none;padding:6px 16px;border-top:1px solid var(--border)"></div>
 <div id="docker-chart-wrap-${inst.id}" style="display:none;padding:0 16px 14px">
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:10px">
     <div>
@@ -533,7 +532,7 @@ function initCharts(id) {
     { label: 'p99', data: [], borderColor: '#ef4444', backgroundColor: 'transparent' },
   ], 'ms');
 
-  const DOCKER_COLORS = { postgres: '#ef4444', hasura: '#f59e0b', 'db-sync': '#4f9cf9' };
+  const DOCKER_COLORS = { postgres: '#ef4444', hasura: '#f59e0b', server: '#22c55e', background: '#a78bfa' };
   const dockerDatasets = key => Object.entries(DOCKER_COLORS).map(([k, color]) => ({
     label: k, data: [], borderColor: color, backgroundColor: 'transparent'
   }));
@@ -577,12 +576,12 @@ function updateCard(id, data) {
   const inst = state.instances[id];
   if (!inst) return;
 
-  const { status, last_snap: snap, started_at, users_current, failures, ram_mb, cpu_pct, docker_stats, docker_history } = data;
+  const { status, last_snap: snap, started_at, users_current, failures, ram_mb, cpu_pct, docker_stats, docker_history, docker_avgs } = data;
   if (failures) state.failures[id] = failures;
   if (inst.meta) { inst.meta.ram_mb = ram_mb ?? null; inst.meta.cpu_pct = cpu_pct ?? null; inst.meta.docker_stats = docker_stats || []; }
   setText(`m-ram-${id}`, ram_mb != null ? `${ram_mb}` : '—');
   setText(`m-cpu-${id}`, cpu_pct != null ? `${cpu_pct}` : '—');
-  updateDockerStats(id, docker_stats || [], docker_history || []);
+  updateDockerStats(id, docker_stats || [], docker_avgs || {});
   updateDockerChart(id, docker_history || []);
 
   // Status dot + label
@@ -657,31 +656,23 @@ function updateCard(id, data) {
 // ── docker stats ─────────────────────────────────────────────────────────
 const DOCKER_KEY_CONTAINERS = ['postgres', 'hasura', 'server', 'background', 'db-sync', 'cardano-node'];
 
-function computeContainerAvgs(history) {
-  const acc = {};
-  for (const h of (history || [])) {
-    for (const c of (h.containers || [])) {
-      if (!acc[c.name]) acc[c.name] = { cpu_sum: 0, cpu_n: 0, mem_sum: 0, mem_n: 0 };
-      if (c.cpu_pct != null) { acc[c.name].cpu_sum += c.cpu_pct; acc[c.name].cpu_n++; }
-      if (c.mem_mb != null) { acc[c.name].mem_sum += c.mem_mb; acc[c.name].mem_n++; }
-    }
-  }
-  return Object.fromEntries(Object.entries(acc).map(([name, v]) => [name, {
-    cpu_avg: v.cpu_n ? v.cpu_sum / v.cpu_n : null,
-    mem_avg: v.mem_n ? v.mem_sum / v.mem_n : null,
-  }]));
-}
-
 function fmtCpu(v) { return v != null ? v.toFixed(1) + '%' : '—'; }
 function fmtMem(v) { return v != null ? (v >= 1024 ? (v / 1024).toFixed(2) + ' GB' : v.toFixed(0) + ' MB') : '—'; }
 
-function updateDockerStats(id, stats, history) {
+function toggleDockerDetail(id) {
+  const el = document.getElementById(`docker-${id}`);
+  const btn = document.getElementById(`docker-toggle-${id}`);
+  if (!el) return;
+  const expanded = el.style.display !== 'none';
+  el.style.display = expanded ? 'none' : '';
+  if (btn) btn.textContent = expanded ? '▸ Details' : '▴ Details';
+}
+
+function updateDockerStats(id, stats, avgs) {
   const el = document.getElementById(`docker-${id}`);
   const summaryEl = document.getElementById(`docker-summary-${id}`);
   if (!el) return;
-  if (!stats || stats.length === 0) { el.style.display = 'none'; return; }
-
-  const avgs = computeContainerAvgs(history);
+  if (!stats || stats.length === 0) { el.style.display = 'none'; if (summaryEl) summaryEl.style.display = 'none'; return; }
 
   const rows = stats
     .filter(c => c.name && !c.name.startsWith('~'))
@@ -694,31 +685,37 @@ function updateDockerStats(id, stats, history) {
       const memNow = fmtMem(c.mem_mb);
       const memAvg = avg.mem_avg != null ? `<div style="font-size:.85em;color:var(--muted)">${fmtMem(avg.mem_avg)}</div>` : '';
       return `<tr style="${style}">
-        <td style="padding:2px 8px 2px 0;font-size:.78em;color:var(--muted);white-space:nowrap">${esc(c.name)}</td>
-        <td style="padding:2px 10px 2px 8px;font-size:.78em;text-align:right;color:var(--yellow)">${cpuNow}${cpuAvg}</td>
-        <td style="padding:2px 0 2px 8px;font-size:.78em;text-align:right;color:var(--purple)">${memNow}${memAvg}</td>
+        <td style="padding:3px 8px 3px 0;font-size:.78em;color:var(--muted);white-space:nowrap">${esc(c.name)}</td>
+        <td style="padding:3px 10px 3px 8px;font-size:.78em;text-align:right;color:var(--yellow)">${cpuNow}${cpuAvg}</td>
+        <td style="padding:3px 0 3px 8px;font-size:.78em;text-align:right;color:var(--purple)">${memNow}${memAvg}</td>
       </tr>`;
     }).join('');
   el.innerHTML = `<table style="width:100%;border-collapse:collapse">
     <thead><tr>
-      <th style="padding:2px 8px 4px 0;font-size:.72em;color:var(--muted);text-align:left">Container</th>
-      <th style="padding:2px 10px 4px 8px;font-size:.72em;color:var(--muted);text-align:right">CPU (avg)</th>
-      <th style="padding:2px 0 4px 8px;font-size:.72em;color:var(--muted);text-align:right">MEM (avg)</th>
+      <th style="padding:2px 8px 6px 0;font-size:.72em;color:var(--muted);text-align:left">Container</th>
+      <th style="padding:2px 10px 6px 8px;font-size:.72em;color:var(--muted);text-align:right">CPU · avg</th>
+      <th style="padding:2px 0 6px 8px;font-size:.72em;color:var(--muted);text-align:right">MEM · avg</th>
     </tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
-  el.style.display = '';
 
   if (summaryEl && Object.keys(avgs).length > 0) {
-    let totalCpuAvg = 0, totalMemAvg = 0;
+    let totalCpuAvg = 0, totalMemAvg = 0, maxSamples = 0;
     for (const [name, avg] of Object.entries(avgs)) {
       if (DOCKER_KEY_CONTAINERS.some(k => name.includes(k))) {
         if (avg.cpu_avg != null) totalCpuAvg += avg.cpu_avg;
         if (avg.mem_avg != null) totalMemAvg += avg.mem_avg;
+        if ((avg.samples ?? 0) > maxSamples) maxSamples = avg.samples;
       }
     }
-    summaryEl.innerHTML = `<div style="display:flex;gap:24px;align-items:center;font-size:.8em">
-      <span style="color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-size:.9em">All containers avg</span>
+    const win = maxSamples ? `~${Math.round(maxSamples * 5 / 60)}m` : '';
+    const expanded = el.style.display !== 'none';
+    summaryEl.innerHTML = `<div style="display:flex;gap:20px;align-items:center;font-size:.8em">
+      <button id="docker-toggle-${id}" onclick="toggleDockerDetail('${id}')"
+        style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:.8em;padding:0;white-space:nowrap">
+        ${expanded ? '▴' : '▸'} Details
+      </button>
+      <span style="color:var(--muted);font-size:.85em;text-transform:uppercase;letter-spacing:.04em">avg${win ? ` (${win})` : ''}</span>
       <span>CPU <strong style="color:var(--yellow)">${fmtCpu(totalCpuAvg)}</strong></span>
       <span>MEM <strong style="color:var(--purple)">${fmtMem(totalMemAvg)}</strong></span>
     </div>`;
@@ -736,7 +733,7 @@ function updateDockerChart(id, history) {
   const memChart = inst?.charts?.dockerMem;
   const wrap = document.getElementById(`docker-chart-wrap-${id}`);
   if (!history || history.length === 0) return;
-  const keys = ['postgres', 'hasura', 'db-sync'];
+  const keys = ['postgres', 'hasura', 'server', 'background'];
   const labels = history.map(h => new Date(h.ts * 1000).toLocaleTimeString());
   [cpuChart, memChart].forEach(chart => { if (chart) chart.data.labels = labels; });
   keys.forEach((key, i) => {
@@ -840,6 +837,7 @@ async function startTest(id) {
       state.instances[id].charts.lat.update('none');
     }
     if (state.instances[id]?.meta) state.instances[id].meta.status = 'starting';
+    startPolling(id);
   } catch(e) { alert('Start failed: ' + e.message); }
 }
 
@@ -847,6 +845,8 @@ async function stopTest(id) {
   try {
     await apiFetch(`/instances/${id}/stop`, { method: 'POST' });
     if (state.instances[id]?.meta) state.instances[id].meta.status = 'idle';
+    const inst = state.instances[id];
+    if (inst?.pollTimer) { clearInterval(inst.pollTimer); inst.pollTimer = null; }
     const cfgPanel = document.querySelector(`#card-${id} .config-panel`);
     if (cfgPanel) cfgPanel.style.display = '';
     updateComparison();

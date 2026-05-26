@@ -163,6 +163,7 @@ async def lifespan(_app: FastAPI):
             "cpu_prev_ts": None,
             "stats_url": row.get("stats_url", ""),
             "docker_stats": [],
+            "docker_cum": {},
             "last_seen_id": 0,
             "inst_initialized": False,
         }
@@ -281,6 +282,17 @@ async def _stats_loop() -> None:
                     })
                     if len(inst["docker_history"]) > 300:
                         inst["docker_history"].pop(0)
+                    cum = inst.setdefault("docker_cum", {})
+                    for c in stats:
+                        name = c.get("name", "")
+                        if name not in cum:
+                            cum[name] = {"cpu_sum": 0.0, "cpu_n": 0, "mem_sum": 0.0, "mem_n": 0}
+                        if c.get("cpu_pct") is not None:
+                            cum[name]["cpu_sum"] += c["cpu_pct"]
+                            cum[name]["cpu_n"] += 1
+                        if c.get("mem_mb") is not None:
+                            cum[name]["mem_sum"] += c["mem_mb"]
+                            cum[name]["mem_n"] += 1
 
 
 async def _fetch_multi_asset_max_id(url: str) -> int | None:
@@ -561,6 +573,7 @@ async def create_instance(body: InstanceBody):
         "cpu_prev_ts": None,
         "stats_url": body.stats_url.strip(),
         "docker_stats": [],
+        "docker_cum": {},
         "last_seen_id": 0,
         "inst_initialized": False,
     }
@@ -624,6 +637,7 @@ async def start_instance(id: str, body: StartBody):
     inst["users_current"] = 0
     inst["failures"] = []
     inst["started_at"] = time.time()
+    inst["docker_cum"] = {}
     inst["last_config"] = body.model_dump()
 
     asyncio.create_task(_do_start(id, body))
@@ -690,6 +704,17 @@ async def get_instance(id: str):
     return _safe(_get(id))
 
 
+def _compute_docker_avgs(cum: dict[str, dict]) -> dict[str, dict]:
+    return {
+        name: {
+            "cpu_avg": v["cpu_sum"] / v["cpu_n"] if v["cpu_n"] else None,
+            "mem_avg": v["mem_sum"] / v["mem_n"] if v["mem_n"] else None,
+            "samples": v["cpu_n"],
+        }
+        for name, v in cum.items()
+    }
+
+
 @app.get("/api/instances/{id}/metrics")
 async def get_metrics(id: str, tail: int = 150):
     inst = _get(id)
@@ -705,6 +730,7 @@ async def get_metrics(id: str, tail: int = 150):
         "cpu_pct": inst.get("cpu_pct"),
         "docker_stats": inst.get("docker_stats", []),
         "docker_history": inst.get("docker_history", [])[-60:],
+        "docker_avgs": _compute_docker_avgs(inst.get("docker_cum", {})),
     }
 
 
