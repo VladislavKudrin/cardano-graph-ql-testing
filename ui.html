@@ -392,10 +392,9 @@ function addInstanceCard(inst) {
   document.getElementById('instanceGrid').appendChild(el);
   document.getElementById('emptyState').classList.add('hidden');
 
+  state.instances[inst.id] = { meta: inst, pollTimer: null, charts: null };
   initCharts(inst.id);
   bindCardEvents(inst.id);
-
-  state.instances[inst.id] = { meta: inst, pollTimer: null, charts: null };
   startPolling(inst.id);
 }
 
@@ -488,6 +487,7 @@ function cardHTML(inst) {
 </div>
 
 <div id="docker-${inst.id}" style="display:none;padding:8px 16px 4px;border-top:1px solid var(--border)"></div>
+<div id="docker-summary-${inst.id}" style="display:none;padding:6px 16px;border-top:1px solid var(--border);display:none"></div>
 <div id="docker-chart-wrap-${inst.id}" style="display:none;padding:0 16px 14px">
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:10px">
     <div>
@@ -582,7 +582,7 @@ function updateCard(id, data) {
   if (inst.meta) { inst.meta.ram_mb = ram_mb ?? null; inst.meta.cpu_pct = cpu_pct ?? null; inst.meta.docker_stats = docker_stats || []; }
   setText(`m-ram-${id}`, ram_mb != null ? `${ram_mb}` : '—');
   setText(`m-cpu-${id}`, cpu_pct != null ? `${cpu_pct}` : '—');
-  updateDockerStats(id, docker_stats || []);
+  updateDockerStats(id, docker_stats || [], docker_history || []);
   updateDockerChart(id, docker_history || []);
 
   // Status dot + label
@@ -657,21 +657,73 @@ function updateCard(id, data) {
 // ── docker stats ─────────────────────────────────────────────────────────
 const DOCKER_KEY_CONTAINERS = ['postgres', 'hasura', 'server', 'background', 'db-sync', 'cardano-node'];
 
-function updateDockerStats(id, stats) {
+function computeContainerAvgs(history) {
+  const acc = {};
+  for (const h of (history || [])) {
+    for (const c of (h.containers || [])) {
+      if (!acc[c.name]) acc[c.name] = { cpu_sum: 0, cpu_n: 0, mem_sum: 0, mem_n: 0 };
+      if (c.cpu_pct != null) { acc[c.name].cpu_sum += c.cpu_pct; acc[c.name].cpu_n++; }
+      if (c.mem_mb != null) { acc[c.name].mem_sum += c.mem_mb; acc[c.name].mem_n++; }
+    }
+  }
+  return Object.fromEntries(Object.entries(acc).map(([name, v]) => [name, {
+    cpu_avg: v.cpu_n ? v.cpu_sum / v.cpu_n : null,
+    mem_avg: v.mem_n ? v.mem_sum / v.mem_n : null,
+  }]));
+}
+
+function fmtCpu(v) { return v != null ? v.toFixed(1) + '%' : '—'; }
+function fmtMem(v) { return v != null ? (v >= 1024 ? (v / 1024).toFixed(2) + ' GB' : v.toFixed(0) + ' MB') : '—'; }
+
+function updateDockerStats(id, stats, history) {
   const el = document.getElementById(`docker-${id}`);
+  const summaryEl = document.getElementById(`docker-summary-${id}`);
   if (!el) return;
   if (!stats || stats.length === 0) { el.style.display = 'none'; return; }
+
+  const avgs = computeContainerAvgs(history);
+
   const rows = stats
     .filter(c => c.name && !c.name.startsWith('~'))
     .map(c => {
-      const cpu = c.cpu_pct != null ? c.cpu_pct.toFixed(1) + '%' : '—';
-      const mem = c.mem_mb != null ? (c.mem_mb >= 1024 ? (c.mem_mb/1024).toFixed(2) + ' GB' : c.mem_mb.toFixed(0) + ' MB') : '—';
+      const avg = avgs[c.name] || {};
       const highlight = DOCKER_KEY_CONTAINERS.some(k => c.name.includes(k));
       const style = highlight ? '' : 'opacity:.55';
-      return `<tr style="${style}"><td style="padding:2px 8px 2px 0;font-size:.78em;color:var(--muted);white-space:nowrap">${esc(c.name)}</td><td style="padding:2px 10px 2px 8px;font-size:.78em;text-align:right;color:var(--yellow)">${cpu}</td><td style="padding:2px 0 2px 8px;font-size:.78em;text-align:right;color:var(--purple)">${mem}</td></tr>`;
+      const cpuNow = fmtCpu(c.cpu_pct);
+      const cpuAvg = avg.cpu_avg != null ? `<div style="font-size:.85em;color:var(--muted)">${fmtCpu(avg.cpu_avg)}</div>` : '';
+      const memNow = fmtMem(c.mem_mb);
+      const memAvg = avg.mem_avg != null ? `<div style="font-size:.85em;color:var(--muted)">${fmtMem(avg.mem_avg)}</div>` : '';
+      return `<tr style="${style}">
+        <td style="padding:2px 8px 2px 0;font-size:.78em;color:var(--muted);white-space:nowrap">${esc(c.name)}</td>
+        <td style="padding:2px 10px 2px 8px;font-size:.78em;text-align:right;color:var(--yellow)">${cpuNow}${cpuAvg}</td>
+        <td style="padding:2px 0 2px 8px;font-size:.78em;text-align:right;color:var(--purple)">${memNow}${memAvg}</td>
+      </tr>`;
     }).join('');
-  el.innerHTML = `<table style="width:100%;border-collapse:collapse"><thead><tr><th style="padding:2px 8px 4px 0;font-size:.72em;color:var(--muted);text-align:left">Container</th><th style="padding:2px 10px 4px 8px;font-size:.72em;color:var(--muted);text-align:right">CPU</th><th style="padding:2px 0 4px 8px;font-size:.72em;color:var(--muted);text-align:right">MEM</th></tr></thead><tbody>${rows}</tbody></table>`;
+  el.innerHTML = `<table style="width:100%;border-collapse:collapse">
+    <thead><tr>
+      <th style="padding:2px 8px 4px 0;font-size:.72em;color:var(--muted);text-align:left">Container</th>
+      <th style="padding:2px 10px 4px 8px;font-size:.72em;color:var(--muted);text-align:right">CPU (avg)</th>
+      <th style="padding:2px 0 4px 8px;font-size:.72em;color:var(--muted);text-align:right">MEM (avg)</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
   el.style.display = '';
+
+  if (summaryEl && Object.keys(avgs).length > 0) {
+    let totalCpuAvg = 0, totalMemAvg = 0;
+    for (const [name, avg] of Object.entries(avgs)) {
+      if (DOCKER_KEY_CONTAINERS.some(k => name.includes(k))) {
+        if (avg.cpu_avg != null) totalCpuAvg += avg.cpu_avg;
+        if (avg.mem_avg != null) totalMemAvg += avg.mem_avg;
+      }
+    }
+    summaryEl.innerHTML = `<div style="display:flex;gap:24px;align-items:center;font-size:.8em">
+      <span style="color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-size:.9em">All containers avg</span>
+      <span>CPU <strong style="color:var(--yellow)">${fmtCpu(totalCpuAvg)}</strong></span>
+      <span>MEM <strong style="color:var(--purple)">${fmtMem(totalMemAvg)}</strong></span>
+    </div>`;
+    summaryEl.style.display = '';
+  }
 }
 
 function findContainer(docker_stats, key) {
