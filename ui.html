@@ -258,8 +258,8 @@ button{cursor:pointer;border:none;border-radius:6px;font-size:.875em;font-weight
         <input id="mUrl" placeholder="http://localhost:3100" />
       </div>
       <div>
-        <label>SSH Host (for docker stats, optional)</label>
-        <input id="mSsh" placeholder="user@hostname" />
+        <label>Stats URL (optional, run stats_agent.py on instance)</label>
+        <input id="mSsh" placeholder="http://localhost:9191" />
       </div>
     </div>
     <div class="modal-actions">
@@ -351,7 +351,7 @@ function openEditModal(id) {
   document.getElementById('modalTitle').textContent = 'Edit Instance';
   document.getElementById('mName').value = inst.name;
   document.getElementById('mUrl').value = inst.url;
-  document.getElementById('mSsh').value = inst.ssh_host || '';
+  document.getElementById('mSsh').value = inst.stats_url || '';
   document.getElementById('addModal').classList.remove('hidden');
 }
 
@@ -368,13 +368,13 @@ async function saveModal() {
     if (state.modalMode === 'add') {
       const inst = await apiFetch('/instances', {
         method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ name, url, ssh_host })
+        body: JSON.stringify({ name, url, stats_url: ssh_host })
       });
       addInstanceCard(inst);
     } else {
       const inst = await apiFetch(`/instances/${state.modalEditId}`, {
         method: 'PATCH', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ name, url, ssh_host })
+        body: JSON.stringify({ name, url, stats_url: ssh_host })
       });
       updateCardMeta(inst);
     }
