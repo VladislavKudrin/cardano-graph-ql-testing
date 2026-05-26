@@ -35,7 +35,6 @@ DB_PATH = Path(__file__).parent / "instances.db"
 
 instances: dict[str, dict[str, Any]] = {}
 _poll_tasks: dict[str, asyncio.Task] = {}
-_docker_tasks: dict[str, asyncio.Task] = {}
 
 pipeline: dict[str, Any] = {
     "running": False,
@@ -167,6 +166,7 @@ async def lifespan(_app: FastAPI):
             "last_seen_id": 0,
             "inst_initialized": False,
         }
+    asyncio.create_task(_stats_loop())
     yield
     for inst in list(instances.values()):
         _kill(inst)
@@ -267,16 +267,14 @@ async def _fetch_docker_stats(stats_url: str) -> list[dict]:
     return []
 
 
-async def _poll_docker_stats(id: str) -> None:
+async def _stats_loop() -> None:
     while True:
         await asyncio.sleep(10)
-        inst = instances.get(id)
-        if not inst or inst["status"] not in ("running", "starting", "spawning"):
-            break
-        if inst.get("stats_url"):
-            stats = await _fetch_docker_stats(inst["stats_url"])
-            if stats:
-                inst["docker_stats"] = stats
+        for inst in list(instances.values()):
+            if inst.get("stats_url"):
+                stats = await _fetch_docker_stats(inst["stats_url"])
+                if stats:
+                    inst["docker_stats"] = stats
 
 
 async def _fetch_multi_asset_max_id(url: str) -> int | None:
@@ -583,9 +581,7 @@ async def delete_instance(id: str):
     task = _poll_tasks.pop(id, None)
     if task:
         task.cancel()
-    dt = _docker_tasks.pop(id, None)
-    if dt:
-        dt.cancel()
+
     del instances[id]
     _db_delete(id)
     return {"ok": True}
@@ -653,9 +649,6 @@ async def _do_start(id: str, body: StartBody) -> None:
         inst["status"] = "spawning"
         t = asyncio.create_task(_poll(id))
         _poll_tasks[id] = t
-        if inst.get("stats_url"):
-            dt = asyncio.create_task(_poll_docker_stats(id))
-            _docker_tasks[id] = dt
 
 
 @app.post("/api/instances/{id}/stop")
@@ -670,9 +663,7 @@ async def stop_instance(id: str):
     task = _poll_tasks.pop(id, None)
     if task:
         task.cancel()
-    dt = _docker_tasks.pop(id, None)
-    if dt:
-        dt.cancel()
+
 
     inst["status"] = "idle"
     inst["process"] = None
