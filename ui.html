@@ -659,8 +659,8 @@ const DOCKER_KEY_CONTAINERS = ['postgres', 'hasura', 'server', 'background', 'db
 function fmtCpu(v) { return v != null ? v.toFixed(1) + '%' : '—'; }
 function fmtMem(v) { return v != null ? (v >= 1024 ? (v / 1024).toFixed(2) + ' GB' : v.toFixed(0) + ' MB') : '—'; }
 
-function toggleDockerDetail(id) {
-  const el = document.getElementById(`docker-${id}`);
+function toggleDockerBreakdown(id) {
+  const el = document.getElementById(`docker-breakdown-${id}`);
   const btn = document.getElementById(`docker-toggle-${id}`);
   if (!el) return;
   const expanded = el.style.display !== 'none';
@@ -674,53 +674,83 @@ function updateDockerStats(id, stats, avgs) {
   if (!el) return;
   if (!stats || stats.length === 0) { el.style.display = 'none'; if (summaryEl) summaryEl.style.display = 'none'; return; }
 
+  // Always-visible current stats table
   const rows = stats
     .filter(c => c.name && !c.name.startsWith('~'))
     .map(c => {
-      const avg = avgs[c.name] || {};
       const highlight = DOCKER_KEY_CONTAINERS.some(k => c.name.includes(k));
       const style = highlight ? '' : 'opacity:.55';
-      const cpuNow = fmtCpu(c.cpu_pct);
-      const cpuAvg = avg.cpu_avg != null ? `<div style="font-size:.85em;color:var(--muted)">${fmtCpu(avg.cpu_avg)}</div>` : '';
-      const memNow = fmtMem(c.mem_mb);
-      const memAvg = avg.mem_avg != null ? `<div style="font-size:.85em;color:var(--muted)">${fmtMem(avg.mem_avg)}</div>` : '';
       return `<tr style="${style}">
         <td style="padding:3px 8px 3px 0;font-size:.78em;color:var(--muted);white-space:nowrap">${esc(c.name)}</td>
-        <td style="padding:3px 10px 3px 8px;font-size:.78em;text-align:right;color:var(--yellow)">${cpuNow}${cpuAvg}</td>
-        <td style="padding:3px 0 3px 8px;font-size:.78em;text-align:right;color:var(--purple)">${memNow}${memAvg}</td>
+        <td style="padding:3px 10px 3px 8px;font-size:.78em;text-align:right;color:var(--yellow)">${fmtCpu(c.cpu_pct)}</td>
+        <td style="padding:3px 0 3px 8px;font-size:.78em;text-align:right;color:var(--purple)">${fmtMem(c.mem_mb)}</td>
       </tr>`;
     }).join('');
   el.innerHTML = `<table style="width:100%;border-collapse:collapse">
     <thead><tr>
       <th style="padding:2px 8px 6px 0;font-size:.72em;color:var(--muted);text-align:left">Container</th>
-      <th style="padding:2px 10px 6px 8px;font-size:.72em;color:var(--muted);text-align:right">CPU · avg</th>
-      <th style="padding:2px 0 6px 8px;font-size:.72em;color:var(--muted);text-align:right">MEM · avg</th>
-    </tr></thead>
-    <tbody>${rows}</tbody>
+      <th style="padding:2px 10px 6px 8px;font-size:.72em;color:var(--muted);text-align:right">CPU</th>
+      <th style="padding:2px 0 6px 8px;font-size:.72em;color:var(--muted);text-align:right">MEM</th>
+    </tr></thead><tbody>${rows}</tbody>
   </table>`;
+  el.style.display = '';
 
-  if (summaryEl && Object.keys(avgs).length > 0) {
-    let totalCpuAvg = 0, totalMemAvg = 0, maxSamples = 0;
-    for (const [name, avg] of Object.entries(avgs)) {
-      if (DOCKER_KEY_CONTAINERS.some(k => name.includes(k))) {
-        if (avg.cpu_avg != null) totalCpuAvg += avg.cpu_avg;
-        if (avg.mem_avg != null) totalMemAvg += avg.mem_avg;
-        if ((avg.samples ?? 0) > maxSamples) maxSamples = avg.samples;
-      }
+  if (!summaryEl || !Object.keys(avgs).length) return;
+
+  // Compute totals for summary bar
+  let totalCpuAvg = 0, totalMemAvg = 0, maxSamples = 0;
+  for (const [name, avg] of Object.entries(avgs)) {
+    if (DOCKER_KEY_CONTAINERS.some(k => name.includes(k))) {
+      if (avg.cpu_avg != null) totalCpuAvg += avg.cpu_avg;
+      if (avg.mem_avg != null) totalMemAvg += avg.mem_avg;
+      if ((avg.samples ?? 0) > maxSamples) maxSamples = avg.samples;
     }
-    const win = maxSamples ? `~${Math.round(maxSamples * 5 / 60)}m` : '';
-    const expanded = el.style.display !== 'none';
-    summaryEl.innerHTML = `<div style="display:flex;gap:20px;align-items:center;font-size:.8em">
-      <button id="docker-toggle-${id}" onclick="toggleDockerDetail('${id}')"
+  }
+  const win = maxSamples ? `~${Math.round(maxSamples * 5 / 60)}m` : '';
+
+  // Per-container breakdown sorted by CPU contribution (for the collapsible section)
+  const breakdownRows = Object.entries(avgs)
+    .filter(([, avg]) => avg.cpu_avg != null || avg.mem_avg != null)
+    .sort(([, a], [, b]) => (b.cpu_avg ?? 0) - (a.cpu_avg ?? 0))
+    .map(([name, avg]) => {
+      const cpuPct = totalCpuAvg > 0 && avg.cpu_avg != null ? (avg.cpu_avg / totalCpuAvg * 100).toFixed(0) + '%' : '—';
+      const memPct = totalMemAvg > 0 && avg.mem_avg != null ? (avg.mem_avg / totalMemAvg * 100).toFixed(0) + '%' : '—';
+      const highlight = DOCKER_KEY_CONTAINERS.some(k => name.includes(k));
+      const style = highlight ? '' : 'opacity:.55';
+      return `<tr style="${style}">
+        <td style="padding:3px 8px 3px 0;font-size:.78em;color:var(--muted);white-space:nowrap">${esc(name)}</td>
+        <td style="padding:3px 6px 3px 8px;font-size:.78em;text-align:right;color:var(--yellow)">${fmtCpu(avg.cpu_avg)}</td>
+        <td style="padding:3px 10px 3px 6px;font-size:.78em;text-align:right;color:var(--muted)">${cpuPct}</td>
+        <td style="padding:3px 6px 3px 8px;font-size:.78em;text-align:right;color:var(--purple)">${fmtMem(avg.mem_avg)}</td>
+        <td style="padding:3px 0 3px 6px;font-size:.78em;text-align:right;color:var(--muted)">${memPct}</td>
+      </tr>`;
+    }).join('');
+
+  const breakdownId = `docker-breakdown-${id}`;
+  const isExpanded = document.getElementById(breakdownId)?.style.display !== 'none';
+  summaryEl.innerHTML = `
+    <div style="display:flex;gap:20px;align-items:center;font-size:.8em">
+      <button id="docker-toggle-${id}" onclick="toggleDockerBreakdown('${id}')"
         style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:.8em;padding:0;white-space:nowrap">
-        ${expanded ? '▴' : '▸'} Details
+        ${isExpanded ? '▴' : '▸'} Details
       </button>
       <span style="color:var(--muted);font-size:.85em;text-transform:uppercase;letter-spacing:.04em">avg${win ? ` (${win})` : ''}</span>
       <span>CPU <strong style="color:var(--yellow)">${fmtCpu(totalCpuAvg)}</strong></span>
       <span>MEM <strong style="color:var(--purple)">${fmtMem(totalMemAvg)}</strong></span>
+    </div>
+    <div id="${breakdownId}" style="display:${isExpanded ? '' : 'none'};margin-top:8px">
+      <table style="width:100%;border-collapse:collapse">
+        <thead><tr>
+          <th style="padding:2px 8px 4px 0;font-size:.72em;color:var(--muted);text-align:left">Container</th>
+          <th style="padding:2px 6px 4px 8px;font-size:.72em;color:var(--muted);text-align:right">CPU avg</th>
+          <th style="padding:2px 10px 4px 6px;font-size:.72em;color:var(--muted);text-align:right">%</th>
+          <th style="padding:2px 6px 4px 8px;font-size:.72em;color:var(--muted);text-align:right">MEM avg</th>
+          <th style="padding:2px 0 4px 6px;font-size:.72em;color:var(--muted);text-align:right">%</th>
+        </tr></thead>
+        <tbody>${breakdownRows}</tbody>
+      </table>
     </div>`;
-    summaryEl.style.display = '';
-  }
+  summaryEl.style.display = '';
 }
 
 function findContainer(docker_stats, key) {
