@@ -487,7 +487,19 @@ function cardHTML(inst) {
   </div>
 </div>
 
-<div id="docker-${inst.id}" style="display:none;padding:8px 16px 12px;border-top:1px solid var(--border)"></div>
+<div id="docker-${inst.id}" style="display:none;padding:8px 16px 4px;border-top:1px solid var(--border)"></div>
+<div id="docker-chart-wrap-${inst.id}" style="display:none;padding:0 16px 14px">
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:10px">
+    <div>
+      <div class="chart-title">Container CPU %</div>
+      <canvas id="chart-docker-cpu-${inst.id}" height="100"></canvas>
+    </div>
+    <div>
+      <div class="chart-title">Container MEM (MB)</div>
+      <canvas id="chart-docker-mem-${inst.id}" height="100"></canvas>
+    </div>
+  </div>
+</div>
 
 <div class="query-table-wrap">
   <table class="query-table">
@@ -521,10 +533,20 @@ function initCharts(id) {
     { label: 'p99', data: [], borderColor: '#ef4444', backgroundColor: 'transparent' },
   ], 'ms');
 
+  const DOCKER_COLORS = { postgres: '#ef4444', hasura: '#f59e0b', 'db-sync': '#4f9cf9' };
+  const dockerDatasets = key => Object.entries(DOCKER_COLORS).map(([k, color]) => ({
+    label: k, data: [], borderColor: color, backgroundColor: 'transparent'
+  }));
+
+  const cpuCtx = document.getElementById(`chart-docker-cpu-${id}`)?.getContext('2d');
+  const memCtx = document.getElementById(`chart-docker-mem-${id}`)?.getContext('2d');
+  const dockerCpuChart = cpuCtx ? mkTimeChart(cpuCtx, dockerDatasets(), 'CPU %') : null;
+  const dockerMemChart = memCtx ? mkTimeChart(memCtx, dockerDatasets(), 'MB') : null;
+
   if (state.instances[id]) {
-    state.instances[id].charts = { rps: rpsChart, lat: latChart };
+    state.instances[id].charts = { rps: rpsChart, lat: latChart, dockerCpu: dockerCpuChart, dockerMem: dockerMemChart };
   } else {
-    state.instances[id] = { meta: null, pollTimer: null, charts: { rps: rpsChart, lat: latChart } };
+    state.instances[id] = { meta: null, pollTimer: null, charts: { rps: rpsChart, lat: latChart, dockerCpu: dockerCpuChart, dockerMem: dockerMemChart } };
   }
 }
 
@@ -555,12 +577,13 @@ function updateCard(id, data) {
   const inst = state.instances[id];
   if (!inst) return;
 
-  const { status, last_snap: snap, started_at, users_current, failures, ram_mb, cpu_pct, docker_stats } = data;
+  const { status, last_snap: snap, started_at, users_current, failures, ram_mb, cpu_pct, docker_stats, docker_history } = data;
   if (failures) state.failures[id] = failures;
   if (inst.meta) { inst.meta.ram_mb = ram_mb ?? null; inst.meta.cpu_pct = cpu_pct ?? null; inst.meta.docker_stats = docker_stats || []; }
   setText(`m-ram-${id}`, ram_mb != null ? `${ram_mb}` : '—');
   setText(`m-cpu-${id}`, cpu_pct != null ? `${cpu_pct}` : '—');
   updateDockerStats(id, docker_stats || []);
+  updateDockerChart(id, docker_history || []);
 
   // Status dot + label
   const dot = document.getElementById(`dot-${id}`);
@@ -653,6 +676,30 @@ function updateDockerStats(id, stats) {
 
 function findContainer(docker_stats, key) {
   return (docker_stats || []).find(c => c.name && c.name.includes(key));
+}
+
+function updateDockerChart(id, history) {
+  const inst = state.instances[id];
+  const cpuChart = inst?.charts?.dockerCpu;
+  const memChart = inst?.charts?.dockerMem;
+  const wrap = document.getElementById(`docker-chart-wrap-${id}`);
+  if (!history || history.length === 0) return;
+  const keys = ['postgres', 'hasura', 'db-sync'];
+  const labels = history.map(h => new Date(h.ts * 1000).toLocaleTimeString());
+  [cpuChart, memChart].forEach(chart => { if (chart) chart.data.labels = labels; });
+  keys.forEach((key, i) => {
+    if (cpuChart) cpuChart.data.datasets[i].data = history.map(h => {
+      const c = (h.containers || []).find(c => c.name && c.name.includes(key));
+      return c ? c.cpu_pct : null;
+    });
+    if (memChart) memChart.data.datasets[i].data = history.map(h => {
+      const c = (h.containers || []).find(c => c.name && c.name.includes(key));
+      return c ? c.mem_mb : null;
+    });
+  });
+  if (cpuChart) cpuChart.update('none');
+  if (memChart) memChart.update('none');
+  if (wrap) wrap.style.display = '';
 }
 
 // ── comparison table ──────────────────────────────────────────────────────

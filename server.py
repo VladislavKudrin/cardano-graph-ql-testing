@@ -269,12 +269,18 @@ async def _fetch_docker_stats(stats_url: str) -> list[dict]:
 
 async def _stats_loop() -> None:
     while True:
-        await asyncio.sleep(10)
+        await asyncio.sleep(5)
         for inst in list(instances.values()):
             if inst.get("stats_url"):
                 stats = await _fetch_docker_stats(inst["stats_url"])
                 if stats:
                     inst["docker_stats"] = stats
+                    inst.setdefault("docker_history", []).append({
+                        "ts": time.time(),
+                        "containers": stats,
+                    })
+                    if len(inst["docker_history"]) > 300:
+                        inst["docker_history"].pop(0)
 
 
 async def _fetch_multi_asset_max_id(url: str) -> int | None:
@@ -698,6 +704,7 @@ async def get_metrics(id: str, tail: int = 150):
         "ram_mb": inst.get("ram_mb"),
         "cpu_pct": inst.get("cpu_pct"),
         "docker_stats": inst.get("docker_stats", []),
+        "docker_history": inst.get("docker_history", [])[-60:],
     }
 
 
