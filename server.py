@@ -45,17 +45,9 @@ pipeline: dict[str, Any] = {
     "session_id": None,
 }
 
-_MINT_QUERY = """{ tokenMints(limit: 30, order_by: { transaction: { includedAt: desc } }) {
-  assetId
-  assetName
-  policyId
-  quantity
-  transaction { hash includedAt }
-} }"""
-
-_ASSET_CHECK_QUERY = """query($id: Hex!) {
-  assets(where: { assetId: { _eq: $id } }) {
-    fingerprint assetId name description metadataHash
+_ASSET_CHECK_QUERY = """query($fp: AssetFingerprint!) {
+  assets(where: { fingerprint: { _eq: $fp } }) {
+    fingerprint policyId name description metadataHash
   }
 }"""
 
@@ -161,6 +153,11 @@ async def lifespan(_app: FastAPI):
             "last_config": {},
             "failures": [],
             "ram_mb": None,
+            "cpu_pct": None,
+            "cpu_prev": None,
+            "cpu_prev_ts": None,
+            "last_seen_id": 0,
+            "inst_initialized": False,
         }
     yield
     for inst in list(instances.values()):
@@ -240,6 +237,28 @@ async def _fetch_status(url: str) -> dict | None:
         return None
 
 
+async def _fetch_multi_asset_max_id(url: str) -> int | None:
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.get(f"{url}/api/multi-asset/max-id", timeout=10)
+            if r.status_code == 200:
+                return int(r.json().get("max_id", 0))
+    except Exception as e:
+        print(f"[pipeline] max-id fetch error from {url}: {type(e).__name__}")
+    return None
+
+
+async def _fetch_multi_asset(url: str, after_id: int) -> dict | None:
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.get(f"{url}/api/multi-asset/recent", params={"afterId": after_id}, timeout=10)
+            if r.status_code == 200:
+                return r.json()
+    except Exception as e:
+        print(f"[pipeline] multi-asset fetch error from {url}: {type(e).__name__}")
+    return None
+
+
 # ── background polling per instance ───────────────────────────────────────
 
 async def _poll(id: str) -> None:
@@ -258,6 +277,19 @@ async def _poll(id: str) -> None:
         if status_data:
             rss = (status_data.get("memory") or {}).get("rss", 0)
             inst["ram_mb"] = round(rss / 1024 / 1024, 1) if rss else None
+            cpu = status_data.get("cpu") or {}
+            if cpu:
+                total_us = cpu.get("user", 0) + cpu.get("system", 0)
+                prev = inst.get("cpu_prev")
+                prev_ts = inst.get("cpu_prev_ts")
+                now_ts = time.time()
+                if prev is not None and prev_ts is not None:
+                    delta_us = total_us - prev
+                    elapsed_us = (now_ts - prev_ts) * 1e6
+                    if elapsed_us > 0:
+                        inst["cpu_pct"] = round(delta_us / elapsed_us * 100, 1)
+                inst["cpu_prev"] = total_us
+                inst["cpu_prev_ts"] = now_ts
 
         if data:
             ts = time.time()
@@ -354,36 +386,37 @@ async def _pipeline_loop() -> None:
 async def _instance_tick(inst: dict) -> None:
     iid = inst["id"]
 
-    # Step 1: detect new mints on this instance (db-sync level, no Asset table filter)
-    data = await _gql(inst["url"], _MINT_QUERY)
-    got_mints = False
-    if data:
-        mints = data.get("tokenMints", [])
-        print(f"[pipeline] {inst['name']}: {len(mints)} mints, {len(pipeline['known'])} known, initialized={pipeline['initialized']}")
-        for mint in mints:
-            asset_id = mint.get("assetId")
-            if not asset_id:
-                continue
-            got_mints = True
-            try:
-                if int(mint.get("quantity", "1")) < 0:
-                    pipeline["known"].add(asset_id)
-                    continue
-            except (ValueError, TypeError):
-                pass
-            if asset_id in pipeline["known"]:
-                continue
-            pipeline["known"].add(asset_id)
+    # Step 1: on first tick, establish baseline cursor at current max multi_asset id
+    if not inst.get("inst_initialized"):
+        max_id = await _fetch_multi_asset_max_id(inst["url"])
+        if max_id is not None:
+            inst["last_seen_id"] = max_id
+            inst["inst_initialized"] = True
             if not pipeline["initialized"]:
+                pipeline["initialized"] = True
+            print(f"[pipeline] {inst['name']}: baseline at multi_asset id={max_id}")
+        return
+
+    # Step 2: detect new assets at db-sync (multi_asset) level
+    data = await _fetch_multi_asset(inst["url"], inst.get("last_seen_id", 0))
+    if data:
+        assets = data.get("assets", [])
+        for asset in assets:
+            new_id = asset.get("id", 0)
+            if new_id > inst.get("last_seen_id", 0):
+                inst["last_seen_id"] = new_id
+            fingerprint = asset.get("fingerprint")
+            if not fingerprint or fingerprint in pipeline["known"]:
                 continue
+            pipeline["known"].add(fingerprint)
             now = time.time()
             entry: dict[str, Any] = {
-                "asset_id": asset_id,
-                "fingerprint": None,
-                "policy_id": mint.get("policyId", ""),
-                "asset_name": mint.get("assetName", ""),
-                "tx_hash": (mint.get("transaction") or {}).get("hash", ""),
-                "included_at": (mint.get("transaction") or {}).get("includedAt", ""),
+                "asset_id": fingerprint,
+                "fingerprint": fingerprint,
+                "policy_id": asset.get("policy_id", ""),
+                "asset_name": asset.get("asset_name_hex", ""),
+                "tx_hash": "",
+                "included_at": "",
                 "detected_at": now,
                 "instances": {},
             }
@@ -392,11 +425,8 @@ async def _instance_tick(inst: dict) -> None:
                 pipeline["entries"].pop()
             if pipeline.get("session_id"):
                 _db_entry_upsert(pipeline["session_id"], entry)
-        if not pipeline["initialized"] and got_mints:
-            pipeline["initialized"] = True
-            print(f"[pipeline] baseline complete, {len(pipeline['known'])} assets known")
 
-    # Step 2: check pending entries for THIS instance
+    # Step 3: check pending entries for THIS instance
     now = time.time()
     for entry in pipeline["entries"][:50]:
         if iid not in entry["instances"]:
@@ -410,7 +440,7 @@ async def _instance_tick(inst: dict) -> None:
         idata = entry["instances"][iid]
         if idata["asset_appeared_at"] and idata["metadata_appeared_at"] is not None:
             continue
-        check = await _gql(inst["url"], _ASSET_CHECK_QUERY, {"id": entry["asset_id"]})
+        check = await _gql(inst["url"], _ASSET_CHECK_QUERY, {"fp": entry["asset_id"]})
         if not check:
             continue
         assets_list = check.get("assets", [])
@@ -419,8 +449,6 @@ async def _instance_tick(inst: dict) -> None:
             a = assets_list[0]
             if idata["asset_appeared_at"] is None:
                 idata["asset_appeared_at"] = now
-                if not entry.get("fingerprint") and a.get("fingerprint"):
-                    entry["fingerprint"] = a["fingerprint"]
                 changed = True
             meta_hash = a.get("metadataHash")
             has_meta = bool(a.get("name") or a.get("description"))
@@ -481,6 +509,8 @@ async def create_instance(body: InstanceBody):
         "last_config": {},
         "failures": [],
         "ram_mb": None,
+        "last_seen_id": 0,
+        "inst_initialized": False,
     }
     _db_save(instances[id])
     return _safe(instances[id])
@@ -617,6 +647,7 @@ async def get_metrics(id: str, tail: int = 150):
         "started_at": inst["started_at"],
         "failures": inst.get("failures", []),
         "ram_mb": inst.get("ram_mb"),
+        "cpu_pct": inst.get("cpu_pct"),
     }
 
 
@@ -701,6 +732,9 @@ async def pipeline_clear():
     pipeline["known"] = set()
     pipeline["initialized"] = False
     pipeline["session_id"] = None
+    for inst in instances.values():
+        inst["inst_initialized"] = False
+        inst["last_seen_id"] = 0
     return {"ok": True}
 
 

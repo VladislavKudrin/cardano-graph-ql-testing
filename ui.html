@@ -73,7 +73,7 @@ button{cursor:pointer;border:none;border-radius:6px;font-size:.875em;font-weight
 .controls{padding:12px 16px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border)}
 
 /* Metric tiles */
-.metrics-row{display:grid;grid-template-columns:repeat(5,1fr);border-bottom:1px solid var(--border)}
+.metrics-row{display:grid;grid-template-columns:repeat(6,1fr);border-bottom:1px solid var(--border)}
 .metric-tile{padding:12px 14px;text-align:center;border-right:1px solid var(--border)}
 .metric-tile:last-child{border-right:none}
 .metric-tile .val{font-size:1.6em;font-weight:700;line-height:1}
@@ -463,6 +463,10 @@ function cardHTML(inst) {
     <div class="val" id="m-ram-${inst.id}" style="color:var(--purple)">—</div>
     <div class="lbl">ram mb</div>
   </div>
+  <div class="metric-tile">
+    <div class="val" id="m-cpu-${inst.id}" style="color:var(--yellow)">—</div>
+    <div class="lbl">cpu %</div>
+  </div>
 </div>
 
 <div class="charts-area">
@@ -542,10 +546,11 @@ function updateCard(id, data) {
   const inst = state.instances[id];
   if (!inst) return;
 
-  const { status, last_snap: snap, started_at, users_current, failures, ram_mb } = data;
+  const { status, last_snap: snap, started_at, users_current, failures, ram_mb, cpu_pct } = data;
   if (failures) state.failures[id] = failures;
-  if (inst.meta) inst.meta.ram_mb = ram_mb ?? null;
+  if (inst.meta) { inst.meta.ram_mb = ram_mb ?? null; inst.meta.cpu_pct = cpu_pct ?? null; }
   setText(`m-ram-${id}`, ram_mb != null ? `${ram_mb}` : '—');
+  setText(`m-cpu-${id}`, cpu_pct != null ? `${cpu_pct}` : '—');
 
   // Status dot + label
   const dot = document.getElementById(`dot-${id}`);
@@ -636,6 +641,7 @@ function updateComparison() {
     { label: 'p95 ms', key: 'p95', fmt: v => v, colorFn: vals => best(vals, 'low'), src: 'snap' },
     { label: 'Error %', key: 'fail_ratio', fmt: v => v + '%', colorFn: vals => best(vals, 'low'), src: 'snap' },
     { label: 'RAM MB', key: 'ram_mb', fmt: v => v != null ? `${v}` : '—', colorFn: vals => vals.some(v => v != null) ? best(vals, 'low') : null, src: 'meta' },
+    { label: 'CPU %', key: 'cpu_pct', fmt: v => v != null ? `${v}%` : '—', colorFn: vals => vals.some(v => v != null) ? best(vals, 'low') : null, src: 'meta' },
     { label: 'Users', key: 'users', fmt: v => v, src: 'snap' },
   ];
 
