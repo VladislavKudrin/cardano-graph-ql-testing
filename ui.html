@@ -257,6 +257,10 @@ button{cursor:pointer;border:none;border-radius:6px;font-size:.875em;font-weight
         <label>GraphQL URL</label>
         <input id="mUrl" placeholder="http://localhost:3100" />
       </div>
+      <div>
+        <label>SSH Host (for docker stats, optional)</label>
+        <input id="mSsh" placeholder="user@hostname" />
+      </div>
     </div>
     <div class="modal-actions">
       <button class="btn-ghost" onclick="closeModal()">Cancel</button>
@@ -335,6 +339,7 @@ function openAddModal() {
   document.getElementById('modalTitle').textContent = 'Add Instance';
   document.getElementById('mName').value = '';
   document.getElementById('mUrl').value = '';
+  document.getElementById('mSsh').value = '';
   document.getElementById('addModal').classList.remove('hidden');
   document.getElementById('mName').focus();
 }
@@ -346,6 +351,7 @@ function openEditModal(id) {
   document.getElementById('modalTitle').textContent = 'Edit Instance';
   document.getElementById('mName').value = inst.name;
   document.getElementById('mUrl').value = inst.url;
+  document.getElementById('mSsh').value = inst.ssh_host || '';
   document.getElementById('addModal').classList.remove('hidden');
 }
 
@@ -356,18 +362,19 @@ function closeModal() {
 async function saveModal() {
   const name = document.getElementById('mName').value.trim();
   const url = document.getElementById('mUrl').value.trim();
+  const ssh_host = document.getElementById('mSsh').value.trim();
   if (!name || !url) return alert('Name and URL required');
   try {
     if (state.modalMode === 'add') {
       const inst = await apiFetch('/instances', {
         method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ name, url })
+        body: JSON.stringify({ name, url, ssh_host })
       });
       addInstanceCard(inst);
     } else {
       const inst = await apiFetch(`/instances/${state.modalEditId}`, {
         method: 'PATCH', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ name, url })
+        body: JSON.stringify({ name, url, ssh_host })
       });
       updateCardMeta(inst);
     }
@@ -480,6 +487,8 @@ function cardHTML(inst) {
   </div>
 </div>
 
+<div id="docker-${inst.id}" style="display:none;padding:8px 16px 12px;border-top:1px solid var(--border)"></div>
+
 <div class="query-table-wrap">
   <table class="query-table">
     <thead>
@@ -546,11 +555,12 @@ function updateCard(id, data) {
   const inst = state.instances[id];
   if (!inst) return;
 
-  const { status, last_snap: snap, started_at, users_current, failures, ram_mb, cpu_pct } = data;
+  const { status, last_snap: snap, started_at, users_current, failures, ram_mb, cpu_pct, docker_stats } = data;
   if (failures) state.failures[id] = failures;
-  if (inst.meta) { inst.meta.ram_mb = ram_mb ?? null; inst.meta.cpu_pct = cpu_pct ?? null; }
+  if (inst.meta) { inst.meta.ram_mb = ram_mb ?? null; inst.meta.cpu_pct = cpu_pct ?? null; inst.meta.docker_stats = docker_stats || []; }
   setText(`m-ram-${id}`, ram_mb != null ? `${ram_mb}` : '—');
   setText(`m-cpu-${id}`, cpu_pct != null ? `${cpu_pct}` : '—');
+  updateDockerStats(id, docker_stats || []);
 
   // Status dot + label
   const dot = document.getElementById(`dot-${id}`);
@@ -621,6 +631,30 @@ function updateCard(id, data) {
   if (inst.meta) inst.meta.status = status;
 }
 
+// ── docker stats ─────────────────────────────────────────────────────────
+const DOCKER_KEY_CONTAINERS = ['postgres', 'hasura', 'server', 'background', 'db-sync', 'cardano-node'];
+
+function updateDockerStats(id, stats) {
+  const el = document.getElementById(`docker-${id}`);
+  if (!el) return;
+  if (!stats || stats.length === 0) { el.style.display = 'none'; return; }
+  const rows = stats
+    .filter(c => c.name && !c.name.startsWith('~'))
+    .map(c => {
+      const cpu = c.cpu_pct != null ? c.cpu_pct.toFixed(1) + '%' : '—';
+      const mem = c.mem_mb != null ? (c.mem_mb >= 1024 ? (c.mem_mb/1024).toFixed(2) + ' GB' : c.mem_mb.toFixed(0) + ' MB') : '—';
+      const highlight = DOCKER_KEY_CONTAINERS.some(k => c.name.includes(k));
+      const style = highlight ? '' : 'opacity:.55';
+      return `<tr style="${style}"><td style="padding:2px 8px 2px 0;font-size:.78em;color:var(--muted);white-space:nowrap">${esc(c.name)}</td><td style="padding:2px 10px 2px 8px;font-size:.78em;text-align:right;color:var(--yellow)">${cpu}</td><td style="padding:2px 0 2px 8px;font-size:.78em;text-align:right;color:var(--purple)">${mem}</td></tr>`;
+    }).join('');
+  el.innerHTML = `<table style="width:100%;border-collapse:collapse"><thead><tr><th style="padding:2px 8px 4px 0;font-size:.72em;color:var(--muted);text-align:left">Container</th><th style="padding:2px 10px 4px 8px;font-size:.72em;color:var(--muted);text-align:right">CPU</th><th style="padding:2px 0 4px 8px;font-size:.72em;color:var(--muted);text-align:right">MEM</th></tr></thead><tbody>${rows}</tbody></table>`;
+  el.style.display = '';
+}
+
+function findContainer(docker_stats, key) {
+  return (docker_stats || []).find(c => c.name && c.name.includes(key));
+}
+
 // ── comparison table ──────────────────────────────────────────────────────
 function updateComparison() {
   const running = Object.values(state.instances).filter(i => i.meta && i.meta.status === 'running');
@@ -643,10 +677,25 @@ function updateComparison() {
     { label: 'RAM MB', key: 'ram_mb', fmt: v => v != null ? `${v}` : '—', colorFn: vals => vals.some(v => v != null) ? best(vals, 'low') : null, src: 'meta' },
     { label: 'CPU %', key: 'cpu_pct', fmt: v => v != null ? `${v}%` : '—', colorFn: vals => vals.some(v => v != null) ? best(vals, 'low') : null, src: 'meta' },
     { label: 'Users', key: 'users', fmt: v => v, src: 'snap' },
+    ...['postgres','hasura','server','background','db-sync'].flatMap(key => [
+      { label: key + ' CPU', key: 'docker_' + key + '_cpu', src: 'computed',
+        fmt: v => v != null ? v.toFixed(1) + '%' : '—',
+        colorFn: vals => vals.some(v => v != null) ? best(vals, 'low') : null,
+        compute: meta => findContainer(meta.docker_stats, key)?.cpu_pct ?? null },
+      { label: key + ' MEM', key: 'docker_' + key + '_mem', src: 'computed',
+        fmt: v => v != null ? (v >= 1024 ? (v/1024).toFixed(2) + ' GB' : v.toFixed(0) + ' MB') : '—',
+        colorFn: vals => vals.some(v => v != null) ? best(vals, 'low') : null,
+        compute: meta => findContainer(meta.docker_stats, key)?.mem_mb ?? null },
+    ]),
   ];
 
   body.innerHTML = metrics.map(m => {
-    const vals = running.map(i => m.src === 'meta' ? (i.meta[m.key] ?? null) : (i.meta.last_snap?.[m.key] ?? null));
+    const vals = running.map(i =>
+      m.src === 'computed' ? m.compute(i.meta) :
+      m.src === 'meta' ? (i.meta[m.key] ?? null) :
+      (i.meta.last_snap?.[m.key] ?? null)
+    );
+    if (m.src === 'computed' && vals.every(v => v === null)) return '';
     const colorResult = m.colorFn ? m.colorFn(vals) : null;
     const classes = colorResult || vals.map(() => '');
     return '<tr><td>' + m.label + '</td>' +

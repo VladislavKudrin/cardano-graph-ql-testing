@@ -35,6 +35,7 @@ DB_PATH = Path(__file__).parent / "instances.db"
 
 instances: dict[str, dict[str, Any]] = {}
 _poll_tasks: dict[str, asyncio.Task] = {}
+_docker_tasks: dict[str, asyncio.Task] = {}
 
 pipeline: dict[str, Any] = {
     "running": False,
@@ -58,12 +59,17 @@ def _db_init() -> None:
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS instances (
-                id   TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                url  TEXT NOT NULL,
-                port INTEGER NOT NULL
+                id       TEXT PRIMARY KEY,
+                name     TEXT NOT NULL,
+                url      TEXT NOT NULL,
+                port     INTEGER NOT NULL,
+                ssh_host TEXT DEFAULT ''
             )
         """)
+        try:
+            conn.execute("ALTER TABLE instances ADD COLUMN ssh_host TEXT DEFAULT ''")
+        except Exception:
+            pass
         conn.execute("""
             CREATE TABLE IF NOT EXISTS pipeline_sessions (
                 id TEXT PRIMARY KEY,
@@ -91,8 +97,8 @@ def _db_init() -> None:
 def _db_save(inst: dict) -> None:
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO instances (id, name, url, port) VALUES (?, ?, ?, ?)",
-            (inst["id"], inst["name"], inst["url"], inst["port"]),
+            "INSERT OR REPLACE INTO instances (id, name, url, port, ssh_host) VALUES (?, ?, ?, ?, ?)",
+            (inst["id"], inst["name"], inst["url"], inst["port"], inst.get("ssh_host", "")),
         )
 
 
@@ -156,6 +162,8 @@ async def lifespan(_app: FastAPI):
             "cpu_pct": None,
             "cpu_prev": None,
             "cpu_prev_ts": None,
+            "ssh_host": row.get("ssh_host", ""),
+            "docker_stats": [],
             "last_seen_id": 0,
             "inst_initialized": False,
         }
@@ -235,6 +243,58 @@ async def _fetch_status(url: str) -> dict | None:
                 return r.json()
     except Exception:
         return None
+
+
+def _parse_mem_mb(s: str) -> float | None:
+    s = s.strip().split('/')[0].strip()
+    for suffix, mult in [('GiB', 1024), ('MiB', 1), ('gib', 1024), ('mib', 1), ('GB', 1000), ('MB', 1), ('kB', 0.001)]:
+        if s.endswith(suffix):
+            try:
+                return round(float(s[:-len(suffix)]) * mult, 1)
+            except ValueError:
+                pass
+    return None
+
+
+async def _fetch_docker_stats(ssh_host: str) -> list[dict]:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=5", ssh_host,
+            "docker", "stats", "--no-stream", "--format", "{{json .}}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+        result = []
+        for line in stdout.decode().strip().split('\n'):
+            if not line.strip():
+                continue
+            try:
+                c = json.loads(line)
+                result.append({
+                    "name": c.get("Name", ""),
+                    "cpu_pct": float(c.get("CPUPerc", "0%").rstrip('%')),
+                    "mem_mb": _parse_mem_mb(c.get("MemUsage", "")),
+                })
+            except Exception:
+                pass
+        return result
+    except Exception as e:
+        print(f"[docker-stats] {ssh_host}: {type(e).__name__}")
+        return []
+
+
+async def _poll_docker_stats(id: str) -> None:
+    while True:
+        await asyncio.sleep(10)
+        inst = instances.get(id)
+        if not inst or inst["status"] not in ("running", "starting", "spawning"):
+            break
+        if inst.get("ssh_host"):
+            stats = await _fetch_docker_stats(inst["ssh_host"])
+            if stats:
+                inst["docker_stats"] = stats
 
 
 async def _fetch_multi_asset_max_id(url: str) -> int | None:
@@ -475,6 +535,7 @@ async def ui() -> HTMLResponse:
 class InstanceBody(BaseModel):
     name: str
     url: str
+    ssh_host: str = ""
 
 
 ALL_GROUPS = ["general", "assets", "transactions", "addresses", "staking"]
@@ -509,6 +570,11 @@ async def create_instance(body: InstanceBody):
         "last_config": {},
         "failures": [],
         "ram_mb": None,
+        "cpu_pct": None,
+        "cpu_prev": None,
+        "cpu_prev_ts": None,
+        "ssh_host": body.ssh_host.strip(),
+        "docker_stats": [],
         "last_seen_id": 0,
         "inst_initialized": False,
     }
@@ -523,6 +589,7 @@ async def update_instance(id: str, body: InstanceBody):
         raise HTTPException(400, "Stop the test before editing")
     inst["name"] = body.name
     inst["url"] = body.url.rstrip("/")
+    inst["ssh_host"] = body.ssh_host.strip()
     _db_save(inst)
     return _safe(inst)
 
@@ -534,6 +601,9 @@ async def delete_instance(id: str):
     task = _poll_tasks.pop(id, None)
     if task:
         task.cancel()
+    dt = _docker_tasks.pop(id, None)
+    if dt:
+        dt.cancel()
     del instances[id]
     _db_delete(id)
     return {"ok": True}
@@ -601,6 +671,9 @@ async def _do_start(id: str, body: StartBody) -> None:
         inst["status"] = "spawning"
         t = asyncio.create_task(_poll(id))
         _poll_tasks[id] = t
+        if inst.get("ssh_host"):
+            dt = asyncio.create_task(_poll_docker_stats(id))
+            _docker_tasks[id] = dt
 
 
 @app.post("/api/instances/{id}/stop")
@@ -615,6 +688,9 @@ async def stop_instance(id: str):
     task = _poll_tasks.pop(id, None)
     if task:
         task.cancel()
+    dt = _docker_tasks.pop(id, None)
+    if dt:
+        dt.cancel()
 
     inst["status"] = "idle"
     inst["process"] = None
@@ -648,6 +724,7 @@ async def get_metrics(id: str, tail: int = 150):
         "failures": inst.get("failures", []),
         "ram_mb": inst.get("ram_mb"),
         "cpu_pct": inst.get("cpu_pct"),
+        "docker_stats": inst.get("docker_stats", []),
     }
 
 
