@@ -158,9 +158,7 @@ class CardanoGraphQLUser(HttpUser):
             """query($fp: AssetFingerprint!) {
               assets(where: { fingerprint: { _eq: $fp } }) {
                 fingerprint policyId assetName name decimals description metadataHash
-                tokenMints(limit: 5, order_by: { transaction: { includedAt: desc } }) {
-                  quantity transaction { hash includedAt }
-                }
+                tokenMints(limit: 5) { quantity }
               }
             }""",
             {"fp": fp},
@@ -248,7 +246,7 @@ class CardanoGraphQLUser(HttpUser):
             return
         self.gql(
             "delegations.sample",
-            "{ delegations(limit: 10) { address stakePoolId } }",
+            "{ delegations(limit: 10) { address } }",
         )
 
     @task(1)

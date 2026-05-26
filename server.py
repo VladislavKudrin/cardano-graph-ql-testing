@@ -45,15 +45,17 @@ pipeline: dict[str, Any] = {
     "session_id": None,
 }
 
-_MINT_QUERY = """{ tokenMints(limit: 30, order_by: { transaction: { includedAt: desc } }, where: { asset: {} }) {
-  asset { assetId policyId assetName fingerprint }
+_MINT_QUERY = """{ tokenMints(limit: 30, order_by: { transaction: { includedAt: desc } }) {
+  assetId
+  assetName
+  policyId
   quantity
   transaction { hash includedAt }
 } }"""
 
 _ASSET_CHECK_QUERY = """query($id: Hex!) {
   assets(where: { assetId: { _eq: $id } }) {
-    assetId fingerprint name description decimals metadataHash
+    fingerprint assetId name description metadataHash
   }
 }"""
 
@@ -158,6 +160,7 @@ async def lifespan(_app: FastAPI):
             "started_at": None,
             "last_config": {},
             "failures": [],
+            "ram_mb": None,
         }
     yield
     for inst in list(instances.values()):
@@ -227,6 +230,16 @@ async def _locust_post(port: int, path: str, data: dict, timeout: float = 5) -> 
         return None
 
 
+async def _fetch_status(url: str) -> dict | None:
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.get(f"{url}/api/status", timeout=3)
+            if r.status_code == 200:
+                return r.json()
+    except Exception:
+        return None
+
+
 # ── background polling per instance ───────────────────────────────────────
 
 async def _poll(id: str) -> None:
@@ -237,10 +250,15 @@ async def _poll(id: str) -> None:
         if inst["status"] not in ("running", "starting", "spawning"):
             break
 
-        data, failures_data = await asyncio.gather(
+        data, failures_data, status_data = await asyncio.gather(
             _locust_get(inst["port"], "/stats/requests"),
             _locust_get(inst["port"], "/stats/failures"),
+            _fetch_status(inst["url"]),
         )
+        if status_data:
+            rss = (status_data.get("memory") or {}).get("rss", 0)
+            inst["ram_mb"] = round(rss / 1024 / 1024, 1) if rss else None
+
         if data:
             ts = time.time()
             state = data.get("state", "")
@@ -328,84 +346,95 @@ async def _gql(url: str, query: str, variables: dict | None = None) -> dict | No
 async def _pipeline_loop() -> None:
     while pipeline["running"]:
         current = list(instances.values())
+        if current:
+            await asyncio.gather(*[_instance_tick(inst) for inst in current])
+        await asyncio.sleep(2)
 
-        # Query all instances concurrently; use first successful result
-        results = await asyncio.gather(*[_gql(inst["url"], _MINT_QUERY) for inst in current])
-        mint_data = next((r for r in results if r), None)
 
-        if not mint_data:
-            print(f"[pipeline] no data from any instance")
-        else:
-            mints = mint_data.get("tokenMints", [])
-            print(f"[pipeline] {len(mints)} mints, {len(pipeline['known'])} known, {len(pipeline['entries'])} entries, initialized={pipeline['initialized']}")
-            for mint in mints:
-                asset = mint.get("asset") or {}
-                asset_id = asset.get("assetId")
-                qty = mint.get("quantity", "1")
-                if not asset_id:
-                    continue
-                if asset_id in pipeline["known"]:
-                    continue
-                try:
-                    if int(qty) < 0:
-                        pipeline["known"].add(asset_id)
-                        continue
-                except ValueError:
-                    pass
-                pipeline["known"].add(asset_id)
-                if not pipeline["initialized"]:
-                    continue
-                entry: dict[str, Any] = {
-                    "asset_id": asset_id,
-                    "policy_id": asset.get("policyId", ""),
-                    "asset_name": asset.get("assetName", ""),
-                    "fingerprint": asset.get("fingerprint"),
-                    "tx_hash": (mint.get("transaction") or {}).get("hash", ""),
-                    "included_at": (mint.get("transaction") or {}).get("includedAt", ""),
-                    "detected_at": time.time(),
-                    "instances": {},
-                }
-                pipeline["entries"].insert(0, entry)
-                if len(pipeline["entries"]) > 200:
-                    pipeline["entries"].pop()
-                if pipeline.get("session_id"):
-                    _db_entry_upsert(pipeline["session_id"], entry)
+async def _instance_tick(inst: dict) -> None:
+    iid = inst["id"]
 
+    # Step 1: detect new mints on this instance (db-sync level, no Asset table filter)
+    data = await _gql(inst["url"], _MINT_QUERY)
+    got_mints = False
+    if data:
+        mints = data.get("tokenMints", [])
+        print(f"[pipeline] {inst['name']}: {len(mints)} mints, {len(pipeline['known'])} known, initialized={pipeline['initialized']}")
+        for mint in mints:
+            asset_id = mint.get("assetId")
+            if not asset_id:
+                continue
+            got_mints = True
+            try:
+                if int(mint.get("quantity", "1")) < 0:
+                    pipeline["known"].add(asset_id)
+                    continue
+            except (ValueError, TypeError):
+                pass
+            if asset_id in pipeline["known"]:
+                continue
+            pipeline["known"].add(asset_id)
             if not pipeline["initialized"]:
-                pipeline["initialized"] = True
-                print(f"[pipeline] baseline complete, {len(pipeline['known'])} assets known")
+                continue
+            now = time.time()
+            entry: dict[str, Any] = {
+                "asset_id": asset_id,
+                "fingerprint": None,
+                "policy_id": mint.get("policyId", ""),
+                "asset_name": mint.get("assetName", ""),
+                "tx_hash": (mint.get("transaction") or {}).get("hash", ""),
+                "included_at": (mint.get("transaction") or {}).get("includedAt", ""),
+                "detected_at": now,
+                "instances": {},
+            }
+            pipeline["entries"].insert(0, entry)
+            if len(pipeline["entries"]) > 200:
+                pipeline["entries"].pop()
+            if pipeline.get("session_id"):
+                _db_entry_upsert(pipeline["session_id"], entry)
+        if not pipeline["initialized"] and got_mints:
+            pipeline["initialized"] = True
+            print(f"[pipeline] baseline complete, {len(pipeline['known'])} assets known")
 
-        # Check pending entries on all instances
-        now = time.time()
-        for entry in pipeline["entries"][:50]:
-            for inst in list(instances.values()):
-                iid = inst["id"]
-                if iid not in entry["instances"]:
-                    entry["instances"][iid] = {
-                        "name": inst["name"],
-                        "asset_appeared_at": None,
-                        "metadata_appeared_at": None,
-                    }
-                idata = entry["instances"][iid]
-                if idata["asset_appeared_at"] and idata["metadata_appeared_at"]:
-                    continue
-                data = await _gql(inst["url"], _ASSET_CHECK_QUERY, {"id": entry["asset_id"]})
-                if not data:
-                    continue
-                assets_list = data.get("assets", [])
-                if assets_list:
-                    changed = False
-                    if idata["asset_appeared_at"] is None:
-                        idata["asset_appeared_at"] = now
-                        changed = True
-                    a = assets_list[0]
-                    if idata["metadata_appeared_at"] is None and (a.get("name") or a.get("description")):
-                        idata["metadata_appeared_at"] = now
-                        changed = True
-                    if changed and pipeline.get("session_id"):
-                        _db_entry_upsert(pipeline["session_id"], entry)
-
-        await asyncio.sleep(10)
+    # Step 2: check pending entries for THIS instance
+    now = time.time()
+    for entry in pipeline["entries"][:50]:
+        if iid not in entry["instances"]:
+            entry["instances"][iid] = {
+                "name": inst["name"],
+                "asset_appeared_at": None,
+                "metadata_appeared_at": None,
+                "metadata_hash": None,
+                "metadata_updates": 0,
+            }
+        idata = entry["instances"][iid]
+        if idata["asset_appeared_at"] and idata["metadata_appeared_at"] is not None:
+            continue
+        check = await _gql(inst["url"], _ASSET_CHECK_QUERY, {"id": entry["asset_id"]})
+        if not check:
+            continue
+        assets_list = check.get("assets", [])
+        changed = False
+        if assets_list:
+            a = assets_list[0]
+            if idata["asset_appeared_at"] is None:
+                idata["asset_appeared_at"] = now
+                if not entry.get("fingerprint") and a.get("fingerprint"):
+                    entry["fingerprint"] = a["fingerprint"]
+                changed = True
+            meta_hash = a.get("metadataHash")
+            has_meta = bool(a.get("name") or a.get("description"))
+            if has_meta:
+                if idata["metadata_appeared_at"] is None:
+                    idata["metadata_appeared_at"] = now
+                    idata["metadata_hash"] = meta_hash
+                    changed = True
+                elif meta_hash and meta_hash != idata.get("metadata_hash"):
+                    idata["metadata_hash"] = meta_hash
+                    idata["metadata_updates"] = idata.get("metadata_updates", 0) + 1
+                    changed = True
+        if changed and pipeline.get("session_id"):
+            _db_entry_upsert(pipeline["session_id"], entry)
 
 
 # ── routes ────────────────────────────────────────────────────────────────
@@ -451,6 +480,7 @@ async def create_instance(body: InstanceBody):
         "started_at": None,
         "last_config": {},
         "failures": [],
+        "ram_mb": None,
     }
     _db_save(instances[id])
     return _safe(instances[id])
@@ -586,6 +616,7 @@ async def get_metrics(id: str, tail: int = 150):
         "users_current": inst["users_current"],
         "started_at": inst["started_at"],
         "failures": inst.get("failures", []),
+        "ram_mb": inst.get("ram_mb"),
     }
 
 
