@@ -69,6 +69,10 @@ def _db_init() -> None:
             conn.execute("ALTER TABLE instances ADD COLUMN stats_url TEXT DEFAULT ''")
         except Exception:
             pass
+        try:
+            conn.execute("ALTER TABLE instances ADD COLUMN hasura_url TEXT DEFAULT ''")
+        except Exception:
+            pass
         conn.execute("""
             CREATE TABLE IF NOT EXISTS pipeline_sessions (
                 id TEXT PRIMARY KEY,
@@ -96,8 +100,8 @@ def _db_init() -> None:
 def _db_save(inst: dict) -> None:
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO instances (id, name, url, port, stats_url) VALUES (?, ?, ?, ?, ?)",
-            (inst["id"], inst["name"], inst["url"], inst["port"], inst.get("stats_url", "")),
+            "INSERT OR REPLACE INTO instances (id, name, url, port, stats_url, hasura_url) VALUES (?, ?, ?, ?, ?, ?)",
+            (inst["id"], inst["name"], inst["url"], inst["port"], inst.get("stats_url", ""), inst.get("hasura_url", "")),
         )
 
 
@@ -157,11 +161,8 @@ async def lifespan(_app: FastAPI):
             "started_at": None,
             "last_config": {},
             "failures": [],
-            "ram_mb": None,
-            "cpu_pct": None,
-            "cpu_prev": None,
-            "cpu_prev_ts": None,
             "stats_url": row.get("stats_url", ""),
+            "hasura_url": row.get("hasura_url", ""),
             "docker_stats": [],
             "docker_cum": {},
             "last_seen_id": 0,
@@ -236,14 +237,6 @@ async def _locust_post(port: int, path: str, data: dict, timeout: float = 5) -> 
         return None
 
 
-async def _fetch_status(url: str) -> dict | None:
-    try:
-        async with httpx.AsyncClient() as c:
-            r = await c.get(f"{url}/api/status", timeout=3)
-            if r.status_code == 200:
-                return r.json()
-    except Exception:
-        return None
 
 
 def _parse_mem_mb(s: str) -> float | None:
@@ -295,26 +288,51 @@ async def _stats_loop() -> None:
                             cum[name]["mem_n"] += 1
 
 
-async def _fetch_multi_asset_max_id(url: str) -> int | None:
+async def _hasura_sql(hasura_url: str, sql: str) -> dict | None:
     try:
         async with httpx.AsyncClient() as c:
-            r = await c.get(f"{url}/api/multi-asset/max-id", timeout=10)
-            if r.status_code == 200:
-                return int(r.json().get("max_id", 0))
-    except Exception as e:
-        print(f"[pipeline] max-id fetch error from {url}: {type(e).__name__}")
-    return None
-
-
-async def _fetch_multi_asset(url: str, after_id: int) -> dict | None:
-    try:
-        async with httpx.AsyncClient() as c:
-            r = await c.get(f"{url}/api/multi-asset/recent", params={"afterId": after_id}, timeout=10)
+            r = await c.post(
+                f"{hasura_url.rstrip('/')}/v2/query",
+                json={"type": "run_sql", "args": {"source": "default", "sql": sql}},
+                timeout=10,
+            )
             if r.status_code == 200:
                 return r.json()
     except Exception as e:
-        print(f"[pipeline] multi-asset fetch error from {url}: {type(e).__name__}")
+        print(f"[pipeline] hasura sql error ({hasura_url}): {type(e).__name__}")
     return None
+
+
+async def _fetch_multi_asset_max_id(hasura_url: str) -> int | None:
+    result = await _hasura_sql(hasura_url, "SELECT COALESCE(MAX(id), 0) AS max_id FROM multi_asset")
+    if result and result.get("result_type") == "TuplesOk" and len(result.get("result", [])) >= 2:
+        try:
+            return int(result["result"][1][0])
+        except Exception:
+            pass
+    return None
+
+
+async def _fetch_multi_asset(hasura_url: str, after_id: int) -> dict | None:
+    sql = (
+        f"SELECT id, encode(policy, 'hex') AS policy_id, "
+        f"encode(name, 'hex') AS asset_name_hex, fingerprint "
+        f"FROM multi_asset WHERE id > {after_id} ORDER BY id ASC LIMIT 50"
+    )
+    result = await _hasura_sql(hasura_url, sql)
+    if not result or result.get("result_type") != "TuplesOk" or len(result.get("result", [])) < 2:
+        return {"assets": []}
+    cols, *rows = result["result"]
+    idx = {name: i for i, name in enumerate(cols)}
+    return {"assets": [
+        {
+            "id": int(r[idx["id"]]),
+            "policy_id": r[idx["policy_id"]],
+            "asset_name_hex": r[idx["asset_name_hex"]],
+            "fingerprint": r[idx["fingerprint"]],
+        }
+        for r in rows
+    ]}
 
 
 # ── background polling per instance ───────────────────────────────────────
@@ -327,27 +345,10 @@ async def _poll(id: str) -> None:
         if inst["status"] not in ("running", "starting", "spawning"):
             break
 
-        data, failures_data, status_data = await asyncio.gather(
+        data, failures_data = await asyncio.gather(
             _locust_get(inst["port"], "/stats/requests"),
             _locust_get(inst["port"], "/stats/failures"),
-            _fetch_status(inst["url"]),
         )
-        if status_data:
-            rss = (status_data.get("memory") or {}).get("rss", 0)
-            inst["ram_mb"] = round(rss / 1024 / 1024, 1) if rss else None
-            cpu = status_data.get("cpu") or {}
-            if cpu:
-                total_us = cpu.get("user", 0) + cpu.get("system", 0)
-                prev = inst.get("cpu_prev")
-                prev_ts = inst.get("cpu_prev_ts")
-                now_ts = time.time()
-                if prev is not None and prev_ts is not None:
-                    delta_us = total_us - prev
-                    elapsed_us = (now_ts - prev_ts) * 1e6
-                    if elapsed_us > 0:
-                        inst["cpu_pct"] = round(delta_us / elapsed_us * 100, 1)
-                inst["cpu_prev"] = total_us
-                inst["cpu_prev_ts"] = now_ts
 
         if data:
             ts = time.time()
@@ -444,9 +445,13 @@ async def _pipeline_loop() -> None:
 async def _instance_tick(inst: dict) -> None:
     iid = inst["id"]
 
+    hasura_url = inst.get("hasura_url", "").strip()
+    if not hasura_url:
+        return
+
     # Step 1: on first tick, establish baseline cursor at current max multi_asset id
     if not inst.get("inst_initialized"):
-        max_id = await _fetch_multi_asset_max_id(inst["url"])
+        max_id = await _fetch_multi_asset_max_id(hasura_url)
         if max_id is not None:
             inst["last_seen_id"] = max_id
             inst["inst_initialized"] = True
@@ -456,7 +461,7 @@ async def _instance_tick(inst: dict) -> None:
         return
 
     # Step 2: detect new assets at db-sync (multi_asset) level
-    data = await _fetch_multi_asset(inst["url"], inst.get("last_seen_id", 0))
+    data = await _fetch_multi_asset(hasura_url, inst.get("last_seen_id", 0))
     if data:
         assets = data.get("assets", [])
         for asset in assets:
@@ -534,6 +539,7 @@ class InstanceBody(BaseModel):
     name: str
     url: str
     stats_url: str = ""
+    hasura_url: str = ""
 
 
 ALL_GROUPS = ["general", "assets", "transactions", "addresses", "staking"]
@@ -567,11 +573,8 @@ async def create_instance(body: InstanceBody):
         "started_at": None,
         "last_config": {},
         "failures": [],
-        "ram_mb": None,
-        "cpu_pct": None,
-        "cpu_prev": None,
-        "cpu_prev_ts": None,
         "stats_url": body.stats_url.strip(),
+        "hasura_url": body.hasura_url.strip(),
         "docker_stats": [],
         "docker_cum": {},
         "last_seen_id": 0,
@@ -589,6 +592,7 @@ async def update_instance(id: str, body: InstanceBody):
     inst["name"] = body.name
     inst["url"] = body.url.rstrip("/")
     inst["stats_url"] = body.stats_url.strip()
+    inst["hasura_url"] = body.hasura_url.strip()
     _db_save(inst)
     return _safe(inst)
 
@@ -726,8 +730,8 @@ async def get_metrics(id: str, tail: int = 150):
         "users_current": inst["users_current"],
         "started_at": inst["started_at"],
         "failures": inst.get("failures", []),
-        "ram_mb": inst.get("ram_mb"),
-        "cpu_pct": inst.get("cpu_pct"),
+        "ram_mb": None,
+        "cpu_pct": None,
         "docker_stats": inst.get("docker_stats", []),
         "docker_history": inst.get("docker_history", [])[-60:],
         "docker_avgs": _compute_docker_avgs(inst.get("docker_cum", {})),

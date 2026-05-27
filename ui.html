@@ -261,6 +261,10 @@ button{cursor:pointer;border:none;border-radius:6px;font-size:.875em;font-weight
         <label>Stats URL (optional, run stats_agent.py on instance)</label>
         <input id="mSsh" placeholder="http://localhost:9191" />
       </div>
+      <div>
+        <label>Hasura URL (optional, for pipeline monitor)</label>
+        <input id="mHasura" placeholder="http://localhost:8091" />
+      </div>
     </div>
     <div class="modal-actions">
       <button class="btn-ghost" onclick="closeModal()">Cancel</button>
@@ -328,7 +332,12 @@ async function apiFetch(path, opts = {}) {
 // ── bootstrap ─────────────────────────────────────────────────────────────
 async function init() {
   const list = await apiFetch('/instances');
-  list.forEach(inst => addInstanceCard(inst));
+  list.forEach(inst => {
+    addInstanceCard(inst);
+    if (['running', 'spawning', 'starting'].includes(inst.status)) {
+      startPolling(inst.id);
+    }
+  });
   updateGlobalStatus();
 }
 
@@ -352,6 +361,7 @@ function openEditModal(id) {
   document.getElementById('mName').value = inst.name;
   document.getElementById('mUrl').value = inst.url;
   document.getElementById('mSsh').value = inst.stats_url || '';
+  document.getElementById('mHasura').value = inst.hasura_url || '';
   document.getElementById('addModal').classList.remove('hidden');
 }
 
@@ -363,18 +373,19 @@ async function saveModal() {
   const name = document.getElementById('mName').value.trim();
   const url = document.getElementById('mUrl').value.trim();
   const ssh_host = document.getElementById('mSsh').value.trim();
+  const hasura_url = document.getElementById('mHasura').value.trim();
   if (!name || !url) return alert('Name and URL required');
   try {
     if (state.modalMode === 'add') {
       const inst = await apiFetch('/instances', {
         method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ name, url, stats_url: ssh_host })
+        body: JSON.stringify({ name, url, stats_url: ssh_host, hasura_url })
       });
       addInstanceCard(inst);
     } else {
       const inst = await apiFetch(`/instances/${state.modalEditId}`, {
         method: 'PATCH', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ name, url, stats_url: ssh_host })
+        body: JSON.stringify({ name, url, stats_url: ssh_host, hasura_url })
       });
       updateCardMeta(inst);
     }
@@ -395,6 +406,16 @@ function addInstanceCard(inst) {
   state.instances[inst.id] = { meta: inst, pollTimer: null, charts: null };
   initCharts(inst.id);
   bindCardEvents(inst.id);
+
+  const isActive = ['running', 'spawning', 'starting'].includes(inst.status);
+  if (isActive) {
+    const dot = document.getElementById(`dot-${inst.id}`);
+    const slabel = document.getElementById(`slabel-${inst.id}`);
+    if (dot) dot.className = `status-dot ${inst.status}`;
+    if (slabel) { slabel.className = `status-label ${inst.status}`; slabel.textContent = inst.status.toUpperCase(); }
+    document.getElementById(`btn-start-${inst.id}`)?.classList.add('hidden');
+    document.getElementById(`btn-stop-${inst.id}`)?.classList.remove('hidden');
+  }
 }
 
 function cardHTML(inst) {
