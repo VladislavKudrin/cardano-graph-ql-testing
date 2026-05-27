@@ -45,7 +45,7 @@ pipeline: dict[str, Any] = {
     "session_id": None,
 }
 
-_ASSET_CHECK_QUERY = """query($fp: AssetFingerprint!) {
+_ASSET_CHECK_QUERY = """query($fp: String!) {
   assets(where: { fingerprint: { _eq: $fp } }) {
     fingerprint policyId name description metadataHash
   }

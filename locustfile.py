@@ -155,7 +155,7 @@ class CardanoGraphQLUser(HttpUser):
         self._tick()
         self.gql(
             "assets.byFingerprint",
-            """query($fp: AssetFingerprint!) {
+            """query($fp: String!) {
               assets(where: { fingerprint: { _eq: $fp } }) {
                 fingerprint policyId assetName name decimals description metadataHash
                 tokenMints(limit: 5) { quantity }
