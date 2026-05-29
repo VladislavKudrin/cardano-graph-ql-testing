@@ -265,7 +265,7 @@ async def _stats_loop() -> None:
     while True:
         await asyncio.sleep(5)
         for inst in list(instances.values()):
-            if inst.get("stats_url"):
+            if inst.get("stats_url") and inst["status"] in ("running", "spawning", "starting"):
                 stats = await _fetch_docker_stats(inst["stats_url"])
                 if stats:
                     inst["docker_stats"] = stats
